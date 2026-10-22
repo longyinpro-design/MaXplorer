@@ -184,12 +184,12 @@ struct SpaceAnalyzerView: View {
         HStack(spacing: 10) {
             Image(systemName: "folder")
                 .foregroundStyle(.secondary)
-            TextField("Root Folder", text: $viewModel.rootPath)
+            TextField("扫描文件夹", text: $viewModel.rootPath)
                 .textFieldStyle(.plain)
                 .disabled(viewModel.isScanning)
                 .onSubmit { viewModel.refresh() }
 
-            Picker("Mode", selection: $mode) {
+            Picker("模式", selection: $mode) {
                 ForEach(SpaceAnalyzerMode.allCases) { mode in
                     Text(mode.displayName).tag(mode)
                 }
@@ -199,12 +199,12 @@ struct SpaceAnalyzerView: View {
             .frame(width: 260)
 
             if viewModel.isScanning {
-                Button("Cancel Scan") { viewModel.cancelScan() }
+                Button("取消扫描") { viewModel.cancelScan() }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
                     .controlSize(.small)
             } else {
-                Button("Scan") { viewModel.refresh() }
+                Button("扫描") { viewModel.refresh() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             }
@@ -226,17 +226,17 @@ struct SpaceAnalyzerView: View {
         case .ready(let root):
             treemapView(root: root)
         case .failed(let msg):
-            ContentUnavailableView("Scan Failed", systemImage: "exclamationmark.triangle", description: Text(msg))
+            ContentUnavailableView("扫描失败", systemImage: "exclamationmark.triangle", description: Text(msg))
         }
     }
 
     private var idleView: some View {
         ContentUnavailableView {
-            Label("No Scan", systemImage: "square.3.layers.3d")
+            Label("尚未扫描", systemImage: "square.3.layers.3d")
         } description: {
-            Text("Enter a folder path above and click Refresh to scan disk usage.")
+            Text("在上方输入文件夹路径，然后点击“扫描”查看空间占用。")
         } actions: {
-            Button("Scan Home Folder") {
+            Button("扫描主目录") {
                 viewModel.startScan(url: FileManager.default.homeDirectoryForCurrentUser)
             }
             .buttonStyle(.borderedProminent)
@@ -247,7 +247,7 @@ struct SpaceAnalyzerView: View {
         VStack(spacing: 16) {
             ProgressView()
                 .controlSize(.large)
-            Text("Scanning… \(count) items found")
+            Text("正在扫描… 已找到 \(count) 项")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -280,7 +280,7 @@ struct SpaceAnalyzerView: View {
             }
             .buttonStyle(.borderless)
             .disabled(drillPath.isEmpty)
-            .help("Go to Parent Folder")
+            .help("前往上一级文件夹")
 
             Button(root.name.isEmpty ? root.url.path : root.name) {
                 drillPath.removeAll()
@@ -309,17 +309,17 @@ struct SpaceAnalyzerView: View {
             if let stats = viewModel.volumeStats {
                 let freePercent = Int((Double(stats.free) / Double(stats.total) * 100).rounded())
                 Label(
-                    "Used: \(ByteCountFormatter.string(fromByteCount: Int64(stats.used), countStyle: .file))",
+                    "已用：\(ByteCountFormatter.string(fromByteCount: Int64(stats.used), countStyle: .file))",
                     systemImage: "internaldrive"
                 )
-                Text("Free: \(ByteCountFormatter.string(fromByteCount: Int64(stats.free), countStyle: .file)) (\(freePercent)%)")
+                Text("可用：\(ByteCountFormatter.string(fromByteCount: Int64(stats.free), countStyle: .file))（\(freePercent)%）")
                     .foregroundStyle(freePercent < 10 ? .red : .secondary)
             } else {
-                Text("Volume information unavailable").foregroundStyle(.secondary)
+                Text("无法获取卷信息").foregroundStyle(.secondary)
             }
             Spacer()
             if case .ready(let root) = viewModel.scanState {
-                Text("Scanned: \(ByteCountFormatter.string(fromByteCount: Int64(root.size), countStyle: .file))")
+                Text("已扫描：\(ByteCountFormatter.string(fromByteCount: Int64(root.size), countStyle: .file))")
                     .foregroundStyle(.secondary)
             }
         }
@@ -442,14 +442,14 @@ private struct TileView: View {
             }
         }
         .contextMenu {
-            Button("Open") {
+            Button("打开") {
                 NSWorkspace.shared.open(node.url)
             }
-            Button("Browse Location") {
+            Button("浏览所在位置") {
                 let target = node.isDirectory ? node.url : node.url.deletingLastPathComponent()
                 tabs.browseLocation(target)
             }
-            Button("Copy Path to Clipboard") {
+            Button("复制路径") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(node.url.path(percentEncoded: false), forType: .string)
             }
@@ -460,7 +460,7 @@ private struct TileView: View {
     private var tooltip: String {
         let sizeText = ByteCountFormatter.string(fromByteCount: Int64(node.size), countStyle: .file)
         if node.isDirectory && mode == .drillDown {
-            return "\(sizeText)\n\(node.descendantCount) objects\n\(node.name)\n\(node.url.path(percentEncoded: false))"
+            return "\(sizeText)\n\(node.descendantCount) 个项目\n\(node.name)\n\(node.url.path(percentEncoded: false))"
         }
         return "\(sizeText)\n\(node.name)\n\(node.url.path(percentEncoded: false))"
     }

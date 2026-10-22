@@ -10,11 +10,11 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .system:
-            return "Match System Settings"
+            return "跟随系统"
         case .light:
-            return "Light"
+            return "浅色"
         case .dark:
-            return "Dark"
+            return "深色"
         }
     }
 
@@ -38,8 +38,8 @@ enum FolderIconStyle: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .mac: "Mac"
-        case .xplorer: "Xplorer"
+        case .mac: "macOS 风格"
+        case .xplorer: "Windows 风格"
         }
     }
 }

@@ -11,11 +11,11 @@ enum AppColorTheme: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .default: "Default"
-        case .water: "Water"
-        case .earth: "Earth"
-        case .fire: "Fire"
-        case .air: "Air"
+        case .default: "默认"
+        case .water: "水"
+        case .earth: "地"
+        case .fire: "火"
+        case .air: "风"
         }
     }
 

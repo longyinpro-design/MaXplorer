@@ -6,8 +6,8 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Appearance") {
-                Picker("Theme", selection: $settings.appearance) {
+            Section("外观") {
+                Picker("明暗模式", selection: $settings.appearance) {
                     ForEach(AppAppearance.allCases) { appearance in
                         Text(appearance.displayName)
                             .tag(appearance)
@@ -15,19 +15,19 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
 
-                Picker("Color Theme Element", selection: $settings.colorTheme) {
+                Picker("主题配色", selection: $settings.colorTheme) {
                     ForEach(AppColorTheme.allCases) { colorTheme in
                         Text(colorTheme.settingsDisplayName)
                             .tag(colorTheme)
                     }
                 }
 
-                Toggle("Banded file and folder rows", isOn: $settings.showsBandedFileRows)
+                Toggle("交替显示文件列表行底色", isOn: $settings.showsBandedFileRows)
 
                 HStack {
-                    Text("Folder Icon Style")
+                    Text("文件夹图标样式")
                     Spacer()
-                    Picker("Folder Icon Style", selection: $settings.folderIconStyle) {
+                    Picker("文件夹图标样式", selection: $settings.folderIconStyle) {
                         ForEach(FolderIconStyle.allCases) { style in
                             Text(style.displayName)
                                 .tag(style)
@@ -39,67 +39,67 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Sorting") {
-                Picker("Default Sort By", selection: $settings.defaultSortColumn) {
+            Section("排序") {
+                Picker("默认排序依据", selection: $settings.defaultSortColumn) {
                     ForEach(FileSortDescriptor.defaultSortColumns) { column in
                         Text(column.title).tag(column)
                     }
                 }
 
-                Picker("Default Order", selection: $settings.defaultSortAscending) {
-                    Text("Ascending").tag(true)
-                    Text("Descending").tag(false)
+                Picker("默认排序顺序", selection: $settings.defaultSortAscending) {
+                    Text("升序").tag(true)
+                    Text("降序").tag(false)
                 }
                 .pickerStyle(.segmented)
 
                 HStack {
-                    Text("MaXplorer remembers the sort you choose in each folder. Folders you have not sorted use the default.")
+                    Text("MaXplorer 会记住每个文件夹的排序方式。尚未设置排序的文件夹将使用默认值。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Forget Folder Sorts") {
+                    Button("清除文件夹排序记录") {
                         settings.forgetFolderSortChoices()
                         tabs.reapplyRememberedSorts()
                     }
                 }
             }
 
-            Section("Workspace") {
+            Section("工作区") {
                 settingSlider(
-                    title: "Maximum number of concurrent tabs",
+                    title: "最多同时打开的标签页数",
                     value: $settings.maximumConcurrentTabs,
                     range: AppSettings.maximumConcurrentTabsRange
                 )
 
                 settingSlider(
-                    title: "Folders kept in navigation history",
+                    title: "导航历史保留的文件夹数",
                     value: $settings.manualFolderHistoryLimit,
                     range: AppSettings.manualFolderHistoryLimitRange
                 )
             }
 
-            Section("Space Analyzer") {
-                Picker("Default Mode", selection: $settings.defaultSpaceAnalyzerMode) {
+            Section("空间分析") {
+                Picker("默认模式", selection: $settings.defaultSpaceAnalyzerMode) {
                     ForEach(SpaceAnalyzerMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
                 }
                 .pickerStyle(.radioGroup)
 
-                Text("All Files Mode shows the complete scanned hierarchy. Drill-Down Mode shows only the current folder's contents and lets you open folders to explore the largest areas.")
+                Text("“全部文件”模式显示完整的扫描层级。“逐层浏览”模式只显示当前文件夹的内容，可逐级打开文件夹查找空间占用较大的项目。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
-            Section("File Transfers") {
+            Section("文件传输") {
                 settingSlider(
-                    title: "Maximum number of concurrent copied files",
+                    title: "最多同时进行的文件传输数",
                     value: $settings.maximumConcurrentCopiedFiles,
                     range: AppSettings.maximumConcurrentCopiedFilesRange
                 )
 
                 settingSlider(
-                    title: "Files kept in transfer history",
+                    title: "传输历史保留的记录数",
                     value: $settings.transferHistoryLimit,
                     range: AppSettings.transferHistoryLimitRange
                 )

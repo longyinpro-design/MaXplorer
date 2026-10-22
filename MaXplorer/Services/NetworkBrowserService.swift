@@ -58,7 +58,7 @@ final class NetworkBrowserService: NSObject {
             return nil
         }
 
-        let kind = service.type == "_afpovertcp._tcp." ? "AFP Server" : "SMB Server"
+        let kind = service.type == "_afpovertcp._tcp." ? "AFP 服务器" : "SMB 服务器"
         return NetworkLocation(name: service.name, url: url, kind: kind)
     }
 }

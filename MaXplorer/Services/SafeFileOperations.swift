@@ -44,7 +44,7 @@ nonisolated enum SafeFileOperations {
         try Task.checkCancellation()
         guard source.isFileURL, destination.isFileURL,
               source.path != "/", destination.path != "/" else {
-            throw Failure("A file operation requires a non-root file URL.")
+            throw Failure("文件操作需要指向非根目录的文件 URL。")
         }
         // Resolve only the parents. The final symlink is the object being copied.
         let source = canonicalEntry(source)
@@ -54,15 +54,15 @@ nonisolated enum SafeFileOperations {
         let sourceInfo = try requiredInfo(source)
         let destinationInfo = try info(destination)
         guard source != destination, !sourceInfo.sameObject(as: destinationInfo) else {
-            throw Failure("Source and destination refer to the same filesystem object.")
+            throw Failure("源位置与目标位置指向同一文件系统对象。")
         }
         if sourceInfo.isDirectory,
            try hasAncestor(destination.deletingLastPathComponent(), matching: sourceInfo) {
-            throw Failure("A folder cannot be copied or moved inside itself.")
+            throw Failure("无法将文件夹复制或移动到其自身内部。")
         }
         if let destinationInfo, destinationInfo.isDirectory,
            try hasAncestor(source.deletingLastPathComponent(), matching: destinationInfo) {
-            throw Failure("The destination contains the source and cannot be replaced.")
+            throw Failure("目标位置包含源项目，无法替换。")
         }
         if destinationInfo != nil && !overwrite { throw CocoaError(.fileWriteFileExists) }
 
@@ -95,15 +95,15 @@ nonisolated enum SafeFileOperations {
             let stagingHandle = try DirectoryHandle(staging)
             try copy(source, to: payload, progress: progress)
             guard try snapshot(source) == before else {
-                throw Failure("The source changed during copying. Nothing was replaced.")
+                throw Failure("复制期间源项目发生变化。未替换任何项目。")
             }
             try sourceParent.validate()
             try destinationParent.validate()
             guard try info(destination) == destinationInfo else {
-                throw Failure("The destination changed during copying. Nothing was replaced.")
+                throw Failure("复制期间目标项目发生变化。未替换任何项目。")
             }
             if let destinationBefore, try snapshot(destination) != destinationBefore {
-                throw Failure("The destination contents changed during copying. Nothing was replaced.")
+                throw Failure("复制期间目标内容发生变化。未替换任何项目。")
             }
             try Task.checkCancellation()
             // Darwin can reject renaming a write-disabled directory. Change
@@ -121,7 +121,7 @@ nonisolated enum SafeFileOperations {
             published = renamed == 0
             if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode) != 0, published {
                 keepRecovery = true
-                throw Failure("The copy was published at \(destination.path), but its directory permissions could not be restored: \(posix(errno, destination).localizedDescription)")
+                throw Failure("副本已保存到 \(destination.path)，但无法恢复其目录权限：\(posix(errno, destination).localizedDescription)")
             }
             guard published else { throw posix(renameError, destination) }
             // Publication is the commit point. Cancellation after it must not
@@ -131,30 +131,30 @@ nonisolated enum SafeFileOperations {
                 do {
                     try sourceParent.validate()
                     guard try snapshot(source, checkCancellation: false) == before else {
-                        throw Failure("The source changed before it could be removed.")
+                        throw Failure("移除源项目之前，源项目已发生变化。")
                     }
                     try FileManager.default.removeItem(at: source)
                 } catch {
-                    throw Failure("The complete copy is at \(destination.path), but the source could not be fully removed. Both locations were kept for inspection. \(error.localizedDescription)")
+                    throw Failure("完整副本位于 \(destination.path)，但无法完全移除源项目。已保留两个位置以供检查。\(error.localizedDescription)")
                 }
             }
         } catch {
             let original = error
             if keepRecovery {
-                throw Failure("\(original.localizedDescription) Recovery files remain at \(staging.path). The source was not removed.")
+                throw Failure("\(original.localizedDescription) 恢复文件保留在 \(staging.path)。未移除源项目。")
             }
             do {
                 if !published { try prepareToDiscard(staging) }
                 try FileManager.default.removeItem(at: staging)
             }
             catch {
-                throw Failure("\(original.localizedDescription) Recovery files remain at \(staging.path): \(error.localizedDescription)")
+                throw Failure("\(original.localizedDescription) 恢复文件保留在 \(staging.path)：\(error.localizedDescription)")
             }
             throw original
         }
         do { try FileManager.default.removeItem(at: staging) }
         catch {
-            throw Failure("The destination was committed. Recovery files remain at \(staging.path): \(error.localizedDescription)")
+            throw Failure("目标项目已保存。恢复文件保留在 \(staging.path)：\(error.localizedDescription)")
         }
     }
 
@@ -267,7 +267,7 @@ nonisolated enum SafeFileOperations {
             if checkCancellation { try Task.checkCancellation() }
             let entry = try requiredInfo(url)
             guard entry.kind == S_IFREG || entry.kind == S_IFDIR || entry.kind == S_IFLNK else {
-                throw Failure("Unsupported filesystem object at \(url.path).")
+                throw Failure("不支持的文件系统对象：\(url.path)。")
             }
             result.entries[relative] = entry
             if entry.kind == S_IFREG { result.bytes += Int64(entry.size) }
@@ -334,7 +334,7 @@ nonisolated enum SafeFileOperations {
         deinit { close(fd) }
         func validate() throws {
             guard identity.sameObject(as: try info(url)) else {
-                throw Failure("A parent directory changed during the operation: \(url.path)")
+                throw Failure("操作期间父目录发生变化：\(url.path)")
             }
         }
     }

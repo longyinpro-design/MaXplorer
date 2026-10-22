@@ -6,6 +6,14 @@ struct SidebarLocation: Identifiable, Hashable {
         case favorites = "Favorites"
         case devices = "Devices"
         case network = "Network"
+
+        var displayName: String {
+            switch self {
+            case .favorites: "收藏夹"
+            case .devices: "设备"
+            case .network: "网络"
+            }
+        }
     }
 
     var id: URL { url }

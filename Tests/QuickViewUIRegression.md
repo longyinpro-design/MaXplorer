@@ -59,3 +59,19 @@ MAXPLORER_TEST_FILTER=preview /Users/long/.local/bin/agent-storage run --project
 ```
 
 Result: 5 command-line preview tests passed, 0 failed; full Debug build and strict signature verification passed. The only build warning was skipped AppIntents metadata extraction. File-operation/cross-volume tests were not rerun for this UI change. Native UI checks were performed through computer use; they are not an unattended XCUITest suite.
+
+## Chinese interface and preview size: 2026-10-22
+
+Scope: Simplified Chinese for app-owned menus, sidebars, toolbar help, settings, dialogs, transfer/space-analysis labels, and bundled help/changelog. Stable enum raw values and preferences retain their original identifiers. User filenames, original document contents, application names, encoding names, paths, and terminal output are not translated. Third-party/system diagnostics may retain their own wording.
+
+Checks performed through native computer use:
+
+- Relaunch the built app and verify Chinese AppKit menus, sidebar, column titles, status text, dates, and system file-kind descriptions. Verify settings and the bundled help/changelog actually render Chinese text.
+- Inspect legacy and modern Office entries. File list and preview header must use the same Chinese type name, including installations whose registered Office type description is English.
+- Open a real `.xls` with Space. Verify 350.75/125.00 and worksheet controls remain visible in the larger preview. The final candidate opened at 1200 × 820 points (2400 × 1640 in the Retina capture); the former default was 680 × 460 points.
+- Open the encrypted `.xlsx` sample. Confirm the native prompt is Chinese, an incorrect password displays Chinese retry text without closing the sheet, and the correct password reveals the expected 350.75 total. Press Escape to close.
+- Initial window sizing must occur once per attached window. The bridge enables native resizing; manual edge dragging was attempted through automation but did not produce a verified size change, so interactive dragging is not recorded as a PASS. Multi-display and smaller-display fitting were not exercised in this run.
+
+Validation: full Debug build and strict signature verification passed; the existing command-line suite passed 33 tests with 0 failures. Cross-volume tests were not rerun because the file-operation engine changed only in error wording. These checks do not reclassify any earlier legacy-provider limitation.
+
+Compact candidate, build/test receipts, and translation audit: `/Users/long/Code/文件管理器/research/2026-10-22/chinese-ui`.

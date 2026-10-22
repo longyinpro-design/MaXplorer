@@ -24,7 +24,7 @@ struct IntegratedTerminalView: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.plain)
-                .help("Close terminal")
+                .help("关闭终端")
             }
             .font(.system(size: 11))
             .padding(.horizontal, 10)

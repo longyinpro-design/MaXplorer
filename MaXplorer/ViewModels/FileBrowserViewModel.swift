@@ -248,7 +248,7 @@ final class FileBrowserViewModel: ObservableObject {
     var isBrowsingNetwork: Bool { currentURL == Self.networkRootURL }
     var currentLocationText: String {
         if currentURL == Self.networkRootURL {
-            return "Network"
+            return "网络"
         }
 
         return currentURL.isFileURL ? currentURL.path : currentURL.absoluteString
@@ -261,7 +261,7 @@ final class FileBrowserViewModel: ObservableObject {
     }
     var tabTitle: String {
         if currentURL == Self.networkRootURL {
-            return "Network"
+            return "网络"
         }
 
         if currentURL.isFileURL {
@@ -295,7 +295,7 @@ final class FileBrowserViewModel: ObservableObject {
 
         locations.append(
             SidebarLocation(
-                name: "Browse Network",
+                name: "浏览网络",
                 url: Self.networkRootURL,
                 group: .network,
                 systemImage: "network"
@@ -325,10 +325,10 @@ final class FileBrowserViewModel: ObservableObject {
 
     private func builtInFavoriteLocations() -> [SidebarLocation] {
         [
-            SidebarLocation(name: "Home", url: FileManager.default.homeDirectoryForCurrentUser, group: .favorites, systemImage: "house.fill", canRemoveFromFavorites: true),
-            SidebarLocation(name: "Desktop", url: homeSubfolder("Desktop"), group: .favorites, systemImage: "desktopcomputer", canRemoveFromFavorites: true),
-            SidebarLocation(name: "Documents", url: homeSubfolder("Documents"), group: .favorites, systemImage: "folder.fill", canRemoveFromFavorites: true),
-            SidebarLocation(name: "Downloads", url: homeSubfolder("Downloads"), group: .favorites, systemImage: "arrow.down.circle.fill", canRemoveFromFavorites: true)
+            SidebarLocation(name: "个人文件夹", url: FileManager.default.homeDirectoryForCurrentUser, group: .favorites, systemImage: "house.fill", canRemoveFromFavorites: true),
+            SidebarLocation(name: "桌面", url: homeSubfolder("Desktop"), group: .favorites, systemImage: "desktopcomputer", canRemoveFromFavorites: true),
+            SidebarLocation(name: "文稿", url: homeSubfolder("Documents"), group: .favorites, systemImage: "folder.fill", canRemoveFromFavorites: true),
+            SidebarLocation(name: "下载", url: homeSubfolder("Downloads"), group: .favorites, systemImage: "arrow.down.circle.fill", canRemoveFromFavorites: true)
         ]
     }
 
@@ -408,7 +408,7 @@ final class FileBrowserViewModel: ObservableObject {
         }
 
         currentURL = url
-        pathText = url == Self.networkRootURL ? "Network" : url.path
+        pathText = url == Self.networkRootURL ? "网络" : url.path
         filterText = ""
         reapplyRememberedSort()
         startMonitoringCurrentFolder()
@@ -502,7 +502,8 @@ final class FileBrowserViewModel: ObservableObject {
 
     func submitPath() {
         let expandedPath = NSString(string: pathText).expandingTildeInPath
-        if expandedPath.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Network") == .orderedSame {
+        if expandedPath.trimmingCharacters(in: .whitespacesAndNewlines) == "网络"
+            || expandedPath.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Network") == .orderedSame {
             navigate(to: Self.networkRootURL)
             return
         }
@@ -516,7 +517,7 @@ final class FileBrowserViewModel: ObservableObject {
         var isDirectory: ObjCBool = false
 
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            errorMessage = "The path does not exist or is not a folder."
+            errorMessage = "路径不存在或不是文件夹。"
             pathText = currentURL.path
             return
         }
@@ -530,7 +531,7 @@ final class FileBrowserViewModel: ObservableObject {
 
     func navigateToManualFolder(_ input: String) -> URL? {
         guard let url = manualFolderURL(from: input), isDirectory(url) else {
-            errorMessage = "Path not found"
+            errorMessage = "未找到路径"
             return nil
         }
 
@@ -544,7 +545,7 @@ final class FileBrowserViewModel: ObservableObject {
 
     func connectToServer(_ address: String, onValidated: (URL) -> Void = { _ in }) {
         guard let serverURL = Self.serverURL(from: address) else {
-            errorMessage = "Enter a valid server address, such as smb://server/share."
+            errorMessage = "请输入有效的服务器地址，例如 smb://server/share。"
             return
         }
 
@@ -651,7 +652,7 @@ final class FileBrowserViewModel: ObservableObject {
     func pinFavorite(_ url: URL) {
         let standardizedURL = url.standardizedFileURL
         guard isDirectory(standardizedURL) else {
-            errorMessage = "Only folders can be added to Favorites."
+            errorMessage = "只能将文件夹添加到收藏夹。"
             return
         }
 
@@ -699,7 +700,7 @@ final class FileBrowserViewModel: ObservableObject {
 
     func createFolder() async {
         do {
-            let createdURL = try await fileSystem.createFolder(named: "New Folder", in: currentURL)
+            let createdURL = try await fileSystem.createFolder(named: "新建文件夹", in: currentURL)
             await reload(selecting: createdURL)
         } catch {
             errorMessage = error.localizedDescription
@@ -1095,7 +1096,7 @@ final class FileBrowserViewModel: ObservableObject {
             return FileItem(
                 url: volume,
                 name: values?.volumeName ?? volume.lastPathComponent,
-                typeDescription: "Mounted Network Volume",
+                typeDescription: "已挂载的网络卷",
                 isDirectory: true,
                 isPackage: false,
                 isAlias: false,

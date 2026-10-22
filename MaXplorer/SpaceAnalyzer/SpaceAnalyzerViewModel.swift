@@ -9,8 +9,8 @@ enum SpaceAnalyzerMode: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .allFiles: "All Files Mode"
-        case .drillDown: "Drill-Down Mode"
+        case .allFiles: "全部文件模式"
+        case .drillDown: "逐层浏览模式"
         }
     }
 }

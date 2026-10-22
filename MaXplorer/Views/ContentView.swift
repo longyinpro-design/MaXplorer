@@ -63,7 +63,7 @@ private struct ActiveBrowserView: View {
             get: { model.errorMessage != nil },
             set: { if !$0 { model.clearError() } }
         )) {
-            Button("OK") {
+            Button("确定") {
                 model.clearError()
             }
         } message: {
@@ -98,7 +98,7 @@ private struct ActiveBrowserView: View {
                 errorMessage: manualFolderError
             ) {
                 guard let folderURL = model.navigateToManualFolder(manualFolderPath) else {
-                    manualFolderError = model.errorMessage ?? "Path not found"
+                    manualFolderError = model.errorMessage ?? "找不到路径"
                     model.clearError()
                     return
                 }
@@ -135,27 +135,27 @@ private struct ActiveBrowserView: View {
             ),
             titleVisibility: .visible
         ) {
-            Button("Overwrite", role: .destructive) {
+            Button("覆盖", role: .destructive) {
                 model.resolveCopyConflict(.overwrite)
             }
 
             if model.copyConflictRequest?.totalConflicts ?? 0 > 1 {
-                Button("Overwrite All", role: .destructive) {
+                Button("全部覆盖", role: .destructive) {
                     model.resolveCopyConflict(.overwriteAll)
                 }
             }
 
-            Button("Skip") {
+            Button("跳过") {
                 model.resolveCopyConflict(.skip)
             }
 
             if model.copyConflictRequest?.totalConflicts ?? 0 > 1 {
-                Button("Skip All") {
+                Button("全部跳过") {
                     model.resolveCopyConflict(.skipAll)
                 }
             }
 
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 model.resolveCopyConflict(.cancel)
             }
         } message: {
@@ -207,7 +207,7 @@ private struct ActiveBrowserView: View {
                 }
             }
 
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 itemsPendingTrash = []
             }
         } message: {
@@ -216,7 +216,7 @@ private struct ActiveBrowserView: View {
             } else if itemsPendingTrash.count == 1, let itemPendingTrash = itemsPendingTrash.first {
                 Text(itemPendingTrash.name)
             } else {
-                Text("\(itemsPendingTrash.count) selected items")
+                Text("已选择 \(itemsPendingTrash.count) 项")
             }
         }
         .environmentObject(model)
@@ -225,25 +225,25 @@ private struct ActiveBrowserView: View {
     private var deletionConfirmationTitle: String {
         let permanentCount = itemsPendingTrash.filter(model.requiresPermanentDeletion).count
         if permanentCount == itemsPendingTrash.count, permanentCount > 0 {
-            return permanentCount == 1 ? "Delete item permanently?" : "Delete items permanently?"
+            return permanentCount == 1 ? "要永久删除此项目吗？" : "要永久删除这些项目吗？"
         }
         if permanentCount > 0 {
-            return "Delete selected items?"
+            return "要删除所选项目吗？"
         }
-        return itemsPendingTrash.count == 1 ? "Move item to Trash?" : "Move items to Trash?"
+        return itemsPendingTrash.count == 1 ? "要将此项目移到废纸篓吗？" : "要将这些项目移到废纸篓吗？"
     }
 
     private var deletionConfirmationButtonTitle: String {
-        itemsPendingTrash.contains(where: model.requiresPermanentDeletion) ? "Delete" : "Move to Trash"
+        itemsPendingTrash.contains(where: model.requiresPermanentDeletion) ? "删除" : "移到废纸篓"
     }
 
     private var deletionConfirmationMessage: String {
         let permanentCount = itemsPendingTrash.filter(model.requiresPermanentDeletion).count
         if permanentCount == itemsPendingTrash.count {
-            let name = itemsPendingTrash.first?.name ?? "The selected items"
-            return "\(name) will be permanently deleted because this network volume does not support Trash. This action cannot be undone."
+            let name = itemsPendingTrash.first?.name ?? "所选项目"
+            return "此网络卷不支持废纸篓，因此将永久删除“\(name)”。此操作无法撤销。"
         }
-        return "Items on network volumes will be permanently deleted because those volumes do not support Trash. Other items will be moved to Trash."
+        return "网络卷上的项目将被永久删除，因为这些卷不支持废纸篓。其他项目将移到废纸篓。"
     }
 
     private var browserNavigationView: some View {
@@ -291,15 +291,15 @@ private struct ActiveBrowserView: View {
 
     private var copyConflictTitle: String {
         guard let request = model.copyConflictRequest else { return "" }
-        return "\"\(request.conflictingName)\" already exists at the destination"
+        return "目标位置已存在“\(request.conflictingName)”"
     }
 
     private var copyConflictMessage: String {
         guard let request = model.copyConflictRequest else { return "" }
         if request.totalConflicts > 1 {
-            return "Conflict \(request.conflictNumber) of \(request.totalConflicts)"
+            return "第 \(request.conflictNumber) 个冲突，共 \(request.totalConflicts) 个"
         }
-        return "An item with this name already exists. Choose how to handle the conflict."
+        return "已存在同名项目，请选择处理方式。"
     }
 }
 
@@ -310,6 +310,13 @@ private struct QuickViewSheet: View {
     @State private var decodedText: String?
     @State private var decodingError: String?
     @State private var openError: String?
+
+    // Leave room for the menu bar, Dock, and the parent window's sheet attachment.
+    private var initialSize: NSSize {
+        let visible = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.size
+            ?? NSSize(width: 1280, height: 960)
+        return NSSize(width: min(1200, visible.width - 80), height: min(820, visible.height - 140))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -332,13 +339,13 @@ private struct QuickViewSheet: View {
 
                 Spacer(minLength: 16)
 
-                Button("Open in Default App") {
+                Button("用默认应用打开") {
                     if !NSWorkspace.shared.open(content.url) {
-                        openError = "No application could open this file. Check that a compatible application is installed."
+                        openError = "无法打开此文件，请确认已安装兼容的应用。"
                     }
                 }
 
-                Button("Done", action: onClose)
+                Button("完成", action: onClose)
                     // Return belongs to the system preview's password field.
                     .keyboardShortcut(.cancelAction)
             }
@@ -346,7 +353,7 @@ private struct QuickViewSheet: View {
             .background(ThemedBarBackground())
 
             if content.isLegacyOfficeDocument {
-                Text("Some older Office files or encryption methods may not preview correctly. If content is missing or a known password is rejected, choose Open in Default App.")
+                Text("部分旧版 Office 文件或加密方式可能无法正常预览。如果内容未显示，或已确认正确的密码仍被拒绝，请选择“用默认应用打开”。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
@@ -354,9 +361,9 @@ private struct QuickViewSheet: View {
             }
 
             if content.allowsTextEncoding {
-                Picker("Text encoding", selection: $textEncoding) {
+                Picker("文本编码", selection: $textEncoding) {
                     ForEach(PreviewTextEncoding.allCases) { encoding in
-                        Text(encoding.rawValue).tag(encoding)
+                        Text(encoding.displayName).tag(encoding)
                     }
                 }
                 .fixedSize()
@@ -369,7 +376,7 @@ private struct QuickViewSheet: View {
                     FilePreviewView(url: content.url)
                 } else {
                     ScrollView {
-                        Text(decodedText ?? decodingError ?? "Loading…")
+                        Text(decodedText ?? decodingError ?? "正在载入…")
                             .font(.system(size: 12, design: .monospaced))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -380,12 +387,18 @@ private struct QuickViewSheet: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(ThemedContentBackground())
         }
-        .frame(minWidth: 680, minHeight: 460)
-        .alert("Unable to Open File", isPresented: Binding(
+        .frame(
+            minWidth: min(680, initialSize.width), idealWidth: initialSize.width, maxWidth: .infinity,
+            minHeight: min(460, initialSize.height), idealHeight: initialSize.height, maxHeight: .infinity
+        )
+        .background(ResizableSheetWindowBridge(minSize: NSSize(
+            width: min(680, initialSize.width), height: min(460, initialSize.height)
+        ), initialSize: initialSize))
+        .alert("无法打开文件", isPresented: Binding(
             get: { openError != nil },
             set: { if !$0 { openError = nil } }
         )) {
-            Button("OK") { openError = nil }
+            Button("确定") { openError = nil }
         } message: {
             Text(openError ?? "")
         }
@@ -441,7 +454,7 @@ private struct BrowserTabStrip: View {
                             onReorder: { draggedID in tabs.moveTab(draggedID, before: tab.id) }
                         )
                         .contextMenu {
-                            Button("Close Space Analyzer") { tabs.closeSpaceAnalyzer() }
+                            Button("关闭空间分析") { tabs.closeSpaceAnalyzer() }
                         }
                     } else if tab.id == tabs.copyQueueTabID {
                         CopyQueueTabButton(
@@ -451,7 +464,7 @@ private struct BrowserTabStrip: View {
                             onClose: { tabs.closeCopyQueue() }
                         )
                         .contextMenu {
-                            Button("Close Copy Queue") { tabs.closeCopyQueue() }
+                            Button("关闭传输队列") { tabs.closeCopyQueue() }
                         }
                     } else {
                         BrowserTabButton(
@@ -486,7 +499,7 @@ private struct BrowserTabStrip: View {
                             }
                         )
                         .contextMenu {
-                            Button("Paste") {
+                            Button("粘贴") {
                                 tabs.pasteItems(
                                     to: tab.id,
                                     maximumConcurrentCopies: settings.maximumConcurrentCopiedFiles
@@ -496,18 +509,18 @@ private struct BrowserTabStrip: View {
 
                             Divider()
 
-                            Button("Duplicate Tab") {
+                            Button("复制标签页") {
                                 tabs.duplicateTab(tab.id)
                             }
                             .keyboardShortcut("d", modifiers: [.command, .shift])
 
                             Divider()
 
-                            Button("Sort by Name") {
+                            Button("按名称排序") {
                                 tabs.sortTabsByName()
                             }
 
-                            Button("Close Duplicate Tabs") {
+                            Button("关闭重复标签页") {
                                 tabs.closeDuplicateTabs()
                             }
                         }
@@ -554,7 +567,7 @@ private struct AddTabButton: View {
         .foregroundStyle(isEnabled ? .primary : .tertiary)
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .onHover { isHovering = $0 }
-        .modernTooltip(isEnabled ? "Open a new tab (⌘T)" : "Maximum number of tabs reached")
+        .modernTooltip(isEnabled ? "新建标签页（⌘T）" : "已达到标签页数量上限")
     }
 }
 
@@ -723,8 +736,8 @@ private struct TabCloseButton: View {
         .disabled(!isEnabled)
         .foregroundStyle(isEnabled ? .secondary : .quaternary)
         .onHover { isHovering = $0 }
-        .accessibilityLabel("Close Tab")
-        .modernTooltip(isEnabled ? "Close Tab" : "At least one tab must remain open")
+        .accessibilityLabel("关闭标签页")
+        .modernTooltip(isEnabled ? "关闭标签页" : "至少保留一个标签页")
     }
 }
 
@@ -750,7 +763,7 @@ private struct SpaceAnalyzerTabButton: View {
                     } else if width >= 62 {
                         SpaceAnalyzerIcon(size: 11)
                     }
-                    Text(isScanning ? "Scanning…" : "Space Analyzer")
+                    Text(isScanning ? "正在扫描…" : "空间分析")
                         .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -812,7 +825,7 @@ private struct CopyQueueTabButton: View {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    Text("Copy Queue")
+                    Text("传输队列")
                         .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -892,13 +905,13 @@ private struct SidebarView: View {
                         .tag(location.url.absoluteString)
                         .contextMenu {
                             if location.url.isFileURL {
-                                Button("Analyze Space under Selected Folder") {
+                                Button("分析所选文件夹的空间占用") {
                                     tabs.openSpaceAnalyzer(url: location.url)
                                 }
                                 Divider()
                             }
                             if location.canRemoveFromFavorites {
-                                Button("Remove from Favorites") {
+                                Button("从个人收藏移除") {
                                     model.removeFavorite(location.url)
                                 }
                             }
@@ -909,21 +922,21 @@ private struct SidebarView: View {
                         }
                 }
             } header: {
-                Text(SidebarLocation.Group.favorites.rawValue)
+                Text(SidebarLocation.Group.favorites.displayName)
             }
             .dropDestination(for: URL.self) { urls, _ in
                 _ = model.pinDroppedFavorites(urls)
             }
 
             if model.sidebarLocations.contains(where: { $0.group == .devices }) {
-                Section(SidebarLocation.Group.devices.rawValue) {
+                Section(SidebarLocation.Group.devices.displayName) {
                     ForEach(model.sidebarLocations.filter { $0.group == .devices }) { location in
                         Label(location.name, systemImage: location.systemImage)
                             .sidebarHover()
                             .tag(location.url.absoluteString)
                             .contextMenu {
                                 if location.url.isFileURL {
-                                    Button("Analyze Space under Selected Folder") {
+                                    Button("分析所选文件夹的空间占用") {
                                         tabs.openSpaceAnalyzer(url: location.url)
                                     }
                                 }
@@ -932,13 +945,13 @@ private struct SidebarView: View {
                 }
             }
 
-            Section("Disk") {
+            Section("磁盘") {
                 Button {
                     tabs.openSpaceAnalyzer()
                 } label: {
                     HStack(spacing: 6) {
                         SpaceAnalyzerIcon(size: 15)
-                        Text("Space Analyzer")
+                        Text("空间分析")
                     }
                 }
                 .buttonStyle(.plain)
@@ -953,7 +966,7 @@ private struct SidebarView: View {
                 Button {
                     model.showConnectToServer()
                 } label: {
-                    Label("Connect to Server", systemImage: "plus.circle")
+                    Label("连接服务器", systemImage: "plus.circle")
                 }
                 .buttonStyle(.plain)
 
@@ -963,7 +976,7 @@ private struct SidebarView: View {
                         .tag(location.url.absoluteString)
                 }
             } header: {
-                Text(SidebarLocation.Group.network.rawValue)
+                Text(SidebarLocation.Group.network.displayName)
             }
 
             }
@@ -974,7 +987,7 @@ private struct SidebarView: View {
 
             VStack(spacing: 2) {
                 SidebarDockedButton(
-                    title: "Settings",
+                    title: "设置",
                     systemImage: "gearshape",
                     isSelected: !tabs.isSpaceAnalyzerActive && model.detailDestination == .settings,
                     usesAccentColor: false,
@@ -982,7 +995,7 @@ private struct SidebarView: View {
                 )
 
                 SidebarDockedButton(
-                    title: "About",
+                    title: "关于",
                     systemImage: "info.circle",
                     isSelected: !tabs.isSpaceAnalyzerActive && model.detailDestination == .about,
                     usesAccentColor: true,
@@ -1058,7 +1071,7 @@ private struct CopyQueueSidebarRow: View {
             }
 
             HStack(spacing: 8) {
-                Label("Copy Queue", systemImage: "doc.on.clipboard")
+                Label("传输队列", systemImage: "doc.on.clipboard")
 
                 Spacer(minLength: 8)
 
@@ -1091,7 +1104,7 @@ private struct BrowserToolbar: View {
                 ToolbarButtonGroup {
                     ToolbarIconButton(
                         systemName: "chevron.backward",
-                        help: "Go back to the previous folder (⌘[)",
+                        help: "返回上一个文件夹（⌘[）",
                         isDisabled: !model.canGoBack
                     ) {
                         model.goBack()
@@ -1099,7 +1112,7 @@ private struct BrowserToolbar: View {
 
                     ToolbarIconButton(
                         systemName: "chevron.forward",
-                        help: "Go forward to the next folder (⌘])",
+                        help: "前往下一个文件夹（⌘]）",
                         isDisabled: !model.canGoForward
                     ) {
                         model.goForward()
@@ -1107,7 +1120,7 @@ private struct BrowserToolbar: View {
 
                     ToolbarIconButton(
                         systemName: "arrow.up.to.line.compact",
-                        help: "Go to the enclosing folder (⌘↑)",
+                        help: "前往上一级文件夹（⌘↑）",
                         isDisabled: !model.canGoUp
                     ) {
                         model.goUp()
@@ -1115,7 +1128,7 @@ private struct BrowserToolbar: View {
 
                     ToolbarIconButton(
                         systemName: "arrow.clockwise",
-                        help: "Reload the current folder (⌘R)"
+                        help: "刷新当前文件夹（⌘R）"
                     ) {
                         model.reload()
                     }
@@ -1124,7 +1137,7 @@ private struct BrowserToolbar: View {
                 ToolbarButtonGroup {
                     ToolbarIconButton(
                         systemName: "folder.badge.plus",
-                        help: "Create a new folder in the current folder (⌘⇧N)",
+                        help: "在当前文件夹中新建文件夹（⌘⇧N）",
                         isDisabled: !model.canCreateFolder
                     ) {
                         Task { await model.createFolder() }
@@ -1132,20 +1145,20 @@ private struct BrowserToolbar: View {
 
                     ToolbarIconButton(
                         systemName: "terminal",
-                        help: "Open Terminal at the current folder (⌘⇧T)"
+                        help: "在当前文件夹打开终端（⌘⇧T）"
                     ) {
                         model.openCurrentFolderInTerminal()
                     }
 
                     ToolbarToggleButton(
                         systemName: "terminal.fill",
-                        help: model.isIntegratedTerminalPresented ? "Close integrated terminal (⌃` )" : "Open integrated terminal (⌃` )",
+                        help: model.isIntegratedTerminalPresented ? "关闭内置终端（⌃`）" : "打开内置终端（⌃`）",
                         isOn: $model.isIntegratedTerminalPresented
                     )
 
                     ToolbarIconButton(
                         systemName: "arrow.up.forward.square",
-                        help: "Reveal the selected item in Finder (⌃⌘R)"
+                        help: "在访达中显示所选项目（⌃⌘R）"
                     ) {
                         model.revealSelectedInFinder()
                     }
@@ -1154,7 +1167,7 @@ private struct BrowserToolbar: View {
                 ToolbarButtonGroup {
                     ToolbarIconButton(
                         systemName: "network.badge.shield.half.filled",
-                        help: "Connect to a network server (⌘K)"
+                        help: "连接网络服务器（⌘K）"
                     ) {
                         model.showConnectToServer()
                     }
@@ -1169,19 +1182,19 @@ private struct BrowserToolbar: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .modernTooltip("Analyze disk space usage")
+                    .modernTooltip("分析磁盘空间占用")
                 }
 
                 ToolbarButtonGroup {
                     ToolbarToggleButton(
                         systemName: "eye.fill",
-                        help: tabs.showHiddenFiles ? "Hide hidden files (⌘⇧.)" : "Show hidden files (⌘⇧.)",
+                        help: tabs.showHiddenFiles ? "隐藏隐藏文件（⌘⇧.）" : "显示隐藏文件（⌘⇧.）",
                         isOn: $tabs.showHiddenFiles
                     )
 
                     ToolbarToggleButton(
                         systemName: "a.square.fill",
-                        help: tabs.showAliases ? "Hide aliases (⌘⇧A)" : "Show aliases (⌘⇧A)",
+                        help: tabs.showAliases ? "隐藏替身（⌘⇧A）" : "显示替身（⌘⇧A）",
                         isOn: $tabs.showAliases,
                         iconSize: 22
                     )
@@ -1189,7 +1202,7 @@ private struct BrowserToolbar: View {
 
                 ToolbarButtonGroup {
                     Menu {
-                        Section("Show Columns") {
+                        Section("显示列") {
                             ForEach(FileColumn.allCases) { column in
                                 Toggle(column.title, isOn: Binding(
                                     get: { settings.visibleColumns.contains(column) },
@@ -1201,7 +1214,7 @@ private struct BrowserToolbar: View {
 
                         Divider()
 
-                        Button("Reset Columns") {
+                        Button("重置列") {
                             settings.resetColumns()
                         }
                     } label: {
@@ -1213,7 +1226,7 @@ private struct BrowserToolbar: View {
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .fixedSize()
-                    .modernTooltip("Choose which columns are shown (or right-click a column header)")
+                    .modernTooltip("选择要显示的列，也可右键点击列标题")
                 }
 
                 Spacer(minLength: 12)
@@ -1223,7 +1236,7 @@ private struct BrowserToolbar: View {
                         .foregroundStyle(.secondary)
                     FilterTextField(
                         text: $model.filterText,
-                        placeholder: "Filter current folder",
+                        placeholder: "筛选当前文件夹",
                         proxy: model.filterFocusProxy
                     )
                     .frame(minWidth: 160, idealWidth: 220, maxWidth: 220)
@@ -1233,7 +1246,7 @@ private struct BrowserToolbar: View {
                 .padding(.vertical, 8)
                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
                 .layoutPriority(1)
-                .modernTooltip("Filter items shown in the current folder")
+                .modernTooltip("筛选当前文件夹中显示的项目")
             }
             .symbolRenderingMode(.hierarchical)
             }
@@ -1242,7 +1255,7 @@ private struct BrowserToolbar: View {
                 Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
                     .foregroundStyle(.secondary)
 
-                TextField("Path", text: $model.pathText)
+                TextField("路径", text: $model.pathText)
                     .textFieldStyle(.plain)
                     .focused($pathFocused)
                     .onSubmit {
@@ -1256,7 +1269,7 @@ private struct BrowserToolbar: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .modernTooltip("Copy the selected item path, or the current folder path if nothing is selected (⌘⌥C)")
+                .modernTooltip("复制所选项目的路径；未选择项目时复制当前文件夹路径（⌘⌥C）")
             }
             .symbolRenderingMode(.hierarchical)
             .padding(.horizontal, 12)
@@ -1278,12 +1291,12 @@ private struct CopyQueueView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Copy Queue")
+                Text("传输队列")
                     .font(.headline)
 
                 Spacer()
 
-                Text("\(queue.activeCopyCount) active")
+                Text("\(queue.activeCopyCount) 项正在进行")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -1292,15 +1305,15 @@ private struct CopyQueueView: View {
 
             if queue.items.isEmpty && queue.history.isEmpty {
                 ContentUnavailableView(
-                    "No Copy Operations",
+                    "暂无传输任务",
                     systemImage: "doc.on.clipboard",
-                    description: Text("Active transfers and completed history will appear here.")
+                    description: Text("正在进行的传输和已完成的记录会显示在这里。")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
                     if !queue.items.isEmpty {
-                        Section("Tasks") {
+                        Section("任务") {
                             ForEach(queue.items) { item in
                                 CopyQueueRow(
                                     item: item,
@@ -1315,7 +1328,7 @@ private struct CopyQueueView: View {
                     }
 
                     if !queue.history.isEmpty {
-                        Section("History") {
+                        Section("历史记录") {
                             ForEach(queue.history) { item in
                                 CopyQueueHistoryRow(item: item)
                                     .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
@@ -1353,7 +1366,7 @@ private struct CopyQueueHistoryRow: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(item.operation == .move ? "Moved" : "Copied")
+                Text(item.operation == .move ? "已移动" : "已复制")
                 Text(item.completedAt, style: .time)
             }
             .font(.caption)
@@ -1415,22 +1428,22 @@ private struct CopyQueueRow: View {
             .buttonStyle(.plain)
             .disabled(!item.state.isActive)
             .foregroundStyle(item.state.isActive ? .secondary : .tertiary)
-            .modernTooltip("Cancel this copy operation")
+            .modernTooltip("取消此传输任务")
         }
     }
 
     private var stateText: String {
         switch item.state {
         case .pending:
-            return "Pending"
+            return "等待中"
         case .running:
-            return item.operation == .move ? "Moving" : "Copying"
+            return item.operation == .move ? "正在移动" : "正在复制"
         case .completed:
-            return "Complete"
+            return "已完成"
         case .failed(let reason):
-            return "Aborted: \(reason)"
+            return "已中止：\(reason)"
         case .cancelled:
-            return "Cancelled"
+            return "已取消"
         }
     }
 
@@ -1440,7 +1453,7 @@ private struct CopyQueueRow: View {
 
     private var speedText: String {
         guard item.state == .running, item.bytesPerSecond > 0 else {
-            return "Speed --"
+            return "速度 --"
         }
 
         return "\(Self.byteFormatter.string(fromByteCount: Int64(item.bytesPerSecond))) /s"
@@ -1448,10 +1461,10 @@ private struct CopyQueueRow: View {
 
     private var etaText: String {
         guard let estimatedSecondsRemaining = item.estimatedSecondsRemaining else {
-            return "ETA --"
+            return "预计剩余 --"
         }
 
-        return "ETA \(Self.durationFormatter.string(from: estimatedSecondsRemaining) ?? "--")"
+        return "预计剩余 \(Self.durationFormatter.string(from: estimatedSecondsRemaining) ?? "--")"
     }
 
     private static let byteFormatter: ByteCountFormatter = {
@@ -1483,10 +1496,10 @@ private struct SettingsSurface: View {
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(colorTheme.tintColor)
 
-                    Text("Settings")
+                    Text("设置")
                         .font(.system(size: 30, weight: .bold, design: .rounded))
 
-                    Text("Tune appearance, tabs, and copy behavior.")
+                    Text("调整外观、标签页和文件传输设置。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -1500,7 +1513,7 @@ private struct SettingsSurface: View {
                 Button {
                     model.dismissAuxiliaryDetail()
                 } label: {
-                    Text("OK")
+                    Text("确定")
                         .font(.headline)
                         .frame(minWidth: 72)
                         .padding(.horizontal, 10)
@@ -1862,7 +1875,7 @@ private struct FileTableView: View {
                 get: { model.selectedItemIDs },
                 set: { model.selectedItemIDs = $0 }
             ), sortOrder: $model.sortOrder, columnCustomization: $settings.columnCustomization) {
-                TableColumn("Name", value: \.name) { item in
+                TableColumn("名称", value: \.name) { item in
                     nameCell(for: item)
                 }
                 .width(min: 220, ideal: 320)
@@ -1870,37 +1883,37 @@ private struct FileTableView: View {
                 // Like Finder, Name is always shown and cannot be hidden.
                 .disabledCustomizationBehavior(.visibility)
 
-                TableColumn("Kind", value: \.displayKind) { item in
+                TableColumn("类型", value: \.displayKind) { item in
                     columnText(item.displayKind, for: item)
                 }
                 .width(min: 120, ideal: 170)
                 .customizationID(FileColumn.kind.id)
 
-                TableColumn("Size", value: \.sortSize) { item in
+                TableColumn("大小", value: \.sortSize) { item in
                     columnText(item.displaySize, for: item, monospacedDigit: true)
                 }
                 .width(min: 80, ideal: 110)
                 .customizationID(FileColumn.size.id)
 
-                TableColumn("Date Modified", value: \.sortModifiedAt) { item in
+                TableColumn("修改日期", value: \.sortModifiedAt) { item in
                     columnText(item.displayModified, for: item)
                 }
                 .width(min: 150, ideal: 180)
                 .customizationID(FileColumn.dateModified.id)
 
-                TableColumn("Date Created", value: \.sortCreatedAt) { item in
+                TableColumn("创建日期", value: \.sortCreatedAt) { item in
                     columnText(item.displayCreated, for: item)
                 }
                 .width(min: 150, ideal: 180)
                 .customizationID(FileColumn.dateCreated.id)
 
-                TableColumn("Date Taken", value: \.sortDateTaken) { item in
+                TableColumn("拍摄日期", value: \.sortDateTaken) { item in
                     columnText(item.displayDateTaken, for: item)
                 }
                 .width(min: 150, ideal: 180)
                 .customizationID(FileColumn.dateTaken.id)
 
-                TableColumn("Owner", value: \.sortOwner) { item in
+                TableColumn("所有者", value: \.sortOwner) { item in
                     columnText(item.displayOwner, for: item)
                 }
                 .width(min: 100, ideal: 140)
@@ -1930,22 +1943,22 @@ private struct FileTableView: View {
                 }
             }
             .contextMenu(forSelectionType: FileItem.ID.self) { selection in
-                Button("Open") {
+                Button("打开") {
                     model.selectedItemIDs = selection
                     model.openSelected()
                 }
                 .keyboardShortcut("o", modifiers: .command)
 
-                Button("Quick View") {
+                Button("快速预览") {
                     model.selectedItemIDs = selection
                     model.quickViewSelectedItem()
                 }
                 .disabled(!canQuickView(selection: selection))
 
-                Menu("Open With") {
+                Menu("打开方式") {
                     let applications = openWithApplications(selection: selection)
                     if applications.isEmpty {
-                        Text("No Applications Found")
+                        Text("未找到可用应用")
                     } else {
                         ForEach(applications) { application in
                             Button(application.name) {
@@ -1959,21 +1972,21 @@ private struct FileTableView: View {
 
                 Divider()
 
-                Button("Cut") {
+                Button("剪切") {
                     model.selectedItemIDs = selection
                     model.cutSelectedItems()
                 }
                 .keyboardShortcut("x", modifiers: .command)
                 .disabled(!canCut(selection: selection))
 
-                Button("Copy") {
+                Button("复制") {
                     model.selectedItemIDs = selection
                     model.copySelectedItems()
                 }
                 .keyboardShortcut("c", modifiers: .command)
                 .disabled(!canCut(selection: selection))
 
-                Button("Rename") {
+                Button("重命名") {
                     startRename(selection: selection)
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
@@ -1987,14 +2000,14 @@ private struct FileTableView: View {
 
                 Divider()
 
-                Button("Add to Favorites") {
+                Button("添加到个人收藏") {
                     pinFolder(selection: selection)
                 }
                 .disabled(!canPin(selection: selection))
 
                 Divider()
 
-                Button("Analyze Space under Selected Folder") {
+                Button("分析所选文件夹的空间占用") {
                     guard let id = selection.first,
                           let item = model.items.first(where: { $0.id == id }),
                           item.isDirectory else { return }
@@ -2003,19 +2016,19 @@ private struct FileTableView: View {
                 }
                 .disabled(!canAnalyzeSpace(selection: selection))
 
-                Button("Copy Path") {
+                Button("复制路径") {
                     model.selectedItemIDs = selection
                     model.copySelectedPath()
                 }
                 .keyboardShortcut("c", modifiers: [.command, .option])
 
-                Button("Open in Terminal") {
+                Button("在终端中打开") {
                     model.selectedItemIDs = selection
                     model.openSelectedInTerminal()
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
 
-                Button("Reveal in Finder") {
+                Button("在访达中显示") {
                     model.selectedItemIDs = selection
                     model.revealSelectedInFinder()
                 }
@@ -2035,7 +2048,7 @@ private struct FileTableView: View {
                     }
             } else if model.displayedItems.isEmpty {
                 ContentUnavailableView(
-                    model.filterText.isEmpty ? "No Items" : "No Matching Items",
+                    model.filterText.isEmpty ? "没有项目" : "没有匹配的项目",
                     systemImage: model.filterText.isEmpty ? (model.isBrowsingNetwork ? "network.slash" : "folder") : "magnifyingglass",
                     description: Text(emptyDescription)
                 )
@@ -2134,7 +2147,7 @@ private struct FileTableView: View {
 
     private func trashActionTitle(selection: Set<FileItem.ID>) -> String {
         let items = model.items.filter { selection.contains($0.id) }
-        return items.contains(where: model.requiresPermanentDeletion) ? "Delete Permanently" : "Move to Trash"
+        return items.contains(where: model.requiresPermanentDeletion) ? "永久删除" : "移到废纸篓"
     }
 
     private func canAnalyzeSpace(selection: Set<FileItem.ID>) -> Bool {
@@ -2145,14 +2158,14 @@ private struct FileTableView: View {
 
     private var emptyDescription: String {
         if !model.filterText.isEmpty {
-            return "The current-folder filter did not match loaded items."
+            return "当前筛选条件与已载入的项目均不匹配。"
         }
 
         if model.isBrowsingNetwork {
-            return "No local SMB servers or mounted network volumes were found. Use Connect to Server for a known address."
+            return "未找到本地 SMB 服务器或已挂载的网络卷。如果知道服务器地址，请使用“连接服务器”。"
         }
 
-        return "This folder is empty or unavailable."
+        return "此文件夹为空或当前无法访问。"
     }
 
     @ViewBuilder
@@ -2221,14 +2234,14 @@ private struct StatusBar: View {
             if model.isLoading {
                 ProgressView()
                     .controlSize(.small)
-                Text("Loading")
+                Text("正在载入")
             } else {
                 if model.selectedItems.isEmpty {
-                    Text("\(model.displayedItems.count) of \(model.items.count) items")
+                    Text("共 \(model.items.count) 项，显示 \(model.displayedItems.count) 项")
                 } else if let selectedFileSize = model.selectedFileSize {
-                    Text("\(model.selectedItems.count) selected • \(ByteCountFormatter.string(fromByteCount: selectedFileSize, countStyle: .file))")
+                    Text("已选择 \(model.selectedItems.count) 项 • \(ByteCountFormatter.string(fromByteCount: selectedFileSize, countStyle: .file))")
                 } else {
-                    Text("\(model.selectedItems.count) selected")
+                    Text("已选择 \(model.selectedItems.count) 项")
                 }
             }
 
@@ -2238,10 +2251,10 @@ private struct StatusBar: View {
                 let freePercent = Int((Double(stats.free) / Double(stats.total) * 100).rounded())
                 HStack(spacing: 12) {
                     Label(
-                        "Used: \(ByteCountFormatter.string(fromByteCount: Int64(stats.used), countStyle: .file))",
+                        "已用：\(ByteCountFormatter.string(fromByteCount: Int64(stats.used), countStyle: .file))",
                         systemImage: "internaldrive"
                     )
-                    Text("Free: \(ByteCountFormatter.string(fromByteCount: Int64(stats.free), countStyle: .file)) (\(freePercent)%)")
+                    Text("可用：\(ByteCountFormatter.string(fromByteCount: Int64(stats.free), countStyle: .file))（\(freePercent)%）")
                         .foregroundStyle(freePercent < 10 ? .red : .secondary)
                 }
                 .foregroundStyle(.secondary)
@@ -2388,7 +2401,7 @@ private struct FinderTagDots: View {
             }
         }
         .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
-        .accessibilityLabel("Tagged")
+        .accessibilityLabel("已添加标签")
     }
 }
 
@@ -2433,10 +2446,10 @@ private struct RenameSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Rename")
+            Text("重命名")
                 .font(.headline)
 
-            TextField("Name", text: $renameText)
+            TextField("名称", text: $renameText)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 360)
                 .onSubmit(onSave)
@@ -2449,8 +2462,8 @@ private struct RenameSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: onCancel)
-                Button("Rename", action: onSave)
+                Button("取消", action: onCancel)
+                Button("重命名", action: onSave)
                     .buttonStyle(.borderedProminent)
                     .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -2471,7 +2484,7 @@ private struct ConnectToServerSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Connect to Server")
+            Text("连接服务器")
                 .font(.headline)
 
             HistoryComboBox(
@@ -2484,8 +2497,8 @@ private struct ConnectToServerSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: onCancel)
-                Button("Connect", action: onConnect)
+                Button("取消", action: onCancel)
+                Button("连接", action: onConnect)
                     .buttonStyle(.borderedProminent)
                     .disabled(trimmedAddress.isEmpty || trimmedAddress == "smb://")
             }
@@ -2507,7 +2520,7 @@ private struct GoToFolderSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Go to Folder")
+            Text("前往文件夹")
                 .font(.headline)
 
             HistoryComboBox(text: $folderPath, history: history, onCommit: onGo)
@@ -2521,8 +2534,8 @@ private struct GoToFolderSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", action: onCancel)
-                Button("Go", action: onGo)
+                Button("取消", action: onCancel)
+                Button("前往", action: onGo)
                     .buttonStyle(.borderedProminent)
                     .disabled(trimmedPath.isEmpty)
             }
@@ -2534,7 +2547,7 @@ private struct GoToFolderSheet: View {
 private struct HistoryComboBox: View {
     @Binding var text: String
     let history: [String]
-    var prompt = "Path"
+    var prompt = "路径"
     let onCommit: () -> Void
     @FocusState private var isFocused: Bool
 
@@ -2550,7 +2563,7 @@ private struct HistoryComboBox: View {
 
             Menu {
                 if history.isEmpty {
-                    Text("No previous connections")
+                    Text("暂无连接记录")
                 } else {
                     ForEach(history, id: \.self) { address in
                         Button(address) {

@@ -197,15 +197,15 @@ struct LocalFileSystemService: FileSystemService {
                 .localizedTypeDescriptionKey, .contentTypeKey
             ])
             guard values.isRegularFile == true, values.isDirectory != true, values.isPackage != true else {
-                throw FileSystemError.previewUnavailable("Quick View is available for regular files, not folders or packages.")
+                throw FileSystemError.previewUnavailable("仅支持预览普通文件，无法预览文件夹或软件包。")
             }
             guard values.isReadable == true else {
-                throw FileSystemError.previewUnavailable("This file cannot be read. Check its permissions and try again.")
+                throw FileSystemError.previewUnavailable("无法读取此文件。请检查文件权限后重试。")
             }
 
             // Quick Look receives the original file. Never reinterpret document/image bytes
             // as text, or strip bytes from a text encoding we do not recognize.
-            let typeDescription = values.localizedTypeDescription ?? "File"
+            let typeDescription = FileTypeDisplayName.name(for: url, fallback: values.localizedTypeDescription ?? "文件")
             let size = ByteCountFormatter.string(fromByteCount: Int64(values.fileSize ?? 0), countStyle: .file)
             return QuickViewContent(
                 url: url,
@@ -329,9 +329,9 @@ enum FileSystemError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidName:
-            return "Enter a valid name."
+            return "请输入有效名称。"
         case .itemAlreadyExists(let name):
-            return "An item named \"\(name)\" already exists."
+            return "已存在名为“\(name)”的项目。"
         case .previewUnavailable(let message):
             return message
         }

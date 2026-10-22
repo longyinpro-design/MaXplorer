@@ -95,10 +95,10 @@
 				};
 			};
 			buildConfigurationList = DDC3BB012FF5524A009477D7 /* Build configuration list for PBXProject "MaXplorer" */;
-			developmentRegion = en;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
 			knownRegions = (
-				en,
+				"zh-Hans",
 				Base,
 			);
 			mainGroup = DDC3BAFD2FF5524A009477D7;

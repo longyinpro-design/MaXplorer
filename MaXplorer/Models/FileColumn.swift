@@ -16,13 +16,13 @@ enum FileColumn: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
-        case .name: return "Name"
-        case .kind: return "Kind"
-        case .size: return "Size"
-        case .dateModified: return "Date Modified"
-        case .dateCreated: return "Date Created"
-        case .dateTaken: return "Date Taken"
-        case .owner: return "Owner"
+        case .name: return "名称"
+        case .kind: return "类型"
+        case .size: return "大小"
+        case .dateModified: return "修改日期"
+        case .dateCreated: return "创建日期"
+        case .dateTaken: return "拍摄日期"
+        case .owner: return "所有者"
         }
     }
 

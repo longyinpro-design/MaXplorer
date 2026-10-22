@@ -83,26 +83,26 @@ extension FileItem {
 
     var displayKind: String {
         if isNetworkLocation {
-            return typeDescription.isEmpty ? "Network Location" : typeDescription
+            return typeDescription.isEmpty ? "网络位置" : typeDescription
         }
 
         if isAlias && isAliasTargetDirectory && !isAliasTargetPackage {
-            return "Folder Alias"
+            return "文件夹替身"
         }
 
         if isAlias {
-            return typeDescription.isEmpty ? "Alias" : typeDescription
+            return typeDescription.isEmpty ? "替身" : typeDescription
         }
 
         if isPackage {
-            return typeDescription.isEmpty ? "Package" : typeDescription
+            return typeDescription.isEmpty ? "软件包" : typeDescription
         }
 
         if isDirectory {
-            return "Folder"
+            return "文件夹"
         }
 
-        return typeDescription.isEmpty ? "File" : typeDescription
+        return FileTypeDisplayName.name(for: url, fallback: typeDescription.isEmpty ? "文件" : typeDescription)
     }
 
     var displaySize: String {
@@ -159,4 +159,39 @@ extension FileItem {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+// Some Office installations register only English type descriptions, even in a
+// Chinese app. These are display labels only; previewing still uses the original URL.
+nonisolated enum FileTypeDisplayName {
+    static func name(for url: URL, fallback: String) -> String {
+        let ext = url.pathExtension.lowercased()
+        let name: String
+        switch ext {
+        case "xls": name = "Excel 97–2004 工作簿"
+        case "xlsx": name = "Excel 工作簿"
+        case "xlsm": name = "Excel 启用宏的工作簿"
+        case "xlsb": name = "Excel 二进制工作簿"
+        case "xlt": name = "Excel 97–2004 模板"
+        case "xltx": name = "Excel 模板"
+        case "xltm": name = "Excel 启用宏的模板"
+        case "doc": name = "Word 97–2004 文稿"
+        case "docx": name = "Word 文稿"
+        case "docm": name = "Word 启用宏的文稿"
+        case "dot": name = "Word 97–2004 模板"
+        case "dotx": name = "Word 模板"
+        case "dotm": name = "Word 启用宏的模板"
+        case "ppt": name = "PowerPoint 97–2003 演示文稿"
+        case "pptx": name = "PowerPoint 演示文稿"
+        case "pptm": name = "PowerPoint 启用宏的演示文稿"
+        case "pps": name = "PowerPoint 97–2003 放映"
+        case "ppsx": name = "PowerPoint 放映"
+        case "ppsm": name = "PowerPoint 启用宏的放映"
+        case "pot": name = "PowerPoint 97–2003 模板"
+        case "potx": name = "PowerPoint 模板"
+        case "potm": name = "PowerPoint 启用宏的模板"
+        default: return fallback
+        }
+        return "\(name)（.\(ext)）"
+    }
 }

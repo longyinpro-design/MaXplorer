@@ -42,19 +42,19 @@ struct MaXplorerApp: App {
         .defaultSize(width: 1180, height: 720)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About MaXplorer") {
+                Button("关于 MaXplorer") {
                     model.showAbout()
                 }
             }
 
             CommandGroup(replacing: .newItem) {
-                Button("New Tab") {
+                Button("新建标签页") {
                     tabs.addTab()
                 }
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(!tabs.canAddTab)
 
-                Button("Duplicate Tab") {
+                Button("复制标签页") {
                     tabs.duplicateTab(tabs.selectedTabID)
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
@@ -62,18 +62,18 @@ struct MaXplorerApp: App {
 
                 Divider()
 
-                Button("Open") {
+                Button("打开") {
                     model.openSelected()
                 }
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(model.selectedItem == nil)
 
-                Button("Quick View") {
+                Button("快速预览") {
                     model.quickViewSelectedItem()
                 }
                 .disabled(!model.canQuickViewSelectedItem)
 
-                Button("New Folder") {
+                Button("新建文件夹") {
                     Task { await model.createFolder() }
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -81,13 +81,13 @@ struct MaXplorerApp: App {
 
                 Divider()
 
-                Button("Rename") {
+                Button("重命名") {
                     model.requestRenameSelected()
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(model.selectedItem?.isNetworkLocation ?? true)
 
-                Button(model.selectedItemsRequirePermanentDeletion ? "Delete Permanently" : "Move to Trash") {
+                Button(model.selectedItemsRequirePermanentDeletion ? "永久删除" : "移到废纸篓") {
                     model.requestTrashSelected()
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
@@ -95,21 +95,21 @@ struct MaXplorerApp: App {
 
                 Divider()
 
-                Button("Add to Favorites") {
+                Button("添加到个人收藏") {
                     model.pinSelectedFolderToFavorites()
                 }
                 .disabled(!(model.selectedItem.map(model.canPinFolder) ?? false))
 
                 Divider()
 
-                Button("Reveal in Finder") {
+                Button("在访达中显示") {
                     model.revealSelectedInFinder()
                 }
                 .keyboardShortcut("r", modifiers: [.command, .control])
             }
 
             CommandGroup(replacing: .pasteboard) {
-                Button("Copy") {
+                Button("复制") {
                     if let terminal = focusedTerminal {
                         terminal.copy(self)
                     } else {
@@ -118,13 +118,13 @@ struct MaXplorerApp: App {
                 }
                 .keyboardShortcut("c", modifiers: .command)
 
-                Button("Cut") {
+                Button("剪切") {
                     model.cutSelectedItem()
                 }
                 .keyboardShortcut("x", modifiers: .command)
                 .disabled(!model.canCutSelectedItem)
 
-                Button("Paste") {
+                Button("粘贴") {
                     if let terminal = focusedTerminal {
                         terminal.paste(self)
                     } else {
@@ -135,97 +135,97 @@ struct MaXplorerApp: App {
 
                 Divider()
 
-                Button("Select All") {
+                Button("全选") {
                     model.selectAll()
                 }
                 .keyboardShortcut("a", modifiers: .command)
                 .disabled(!model.canSelectAll)
 
-                Button("Copy Path") {
+                Button("复制路径") {
                     model.copySelectedPath()
                 }
                 .keyboardShortcut("c", modifiers: [.command, .option])
             }
 
-            CommandMenu("View") {
-                Button("Filter Items") {
+            CommandMenu("显示") {
+                Button("筛选项目") {
                     model.focusFilterField()
                 }
                 .keyboardShortcut("f", modifiers: [.command, .option])
 
                 Divider()
 
-                Button("Reload") {
+                Button("刷新") {
                     model.reload()
                 }
                 .keyboardShortcut("r", modifiers: .command)
 
-                Toggle("Show Hidden Files", isOn: $tabs.showHiddenFiles)
+                Toggle("显示隐藏文件", isOn: $tabs.showHiddenFiles)
                     .keyboardShortcut(".", modifiers: [.command, .shift])
 
-                Toggle("Show Aliases", isOn: $tabs.showAliases)
+                Toggle("显示替身", isOn: $tabs.showAliases)
                     .keyboardShortcut("a", modifiers: [.command, .shift])
             }
 
-            CommandMenu("Tabs") {
-                Button("Select Next Tab") {
+            CommandMenu("标签页") {
+                Button("选择下一个标签页") {
                     tabs.selectNextTab()
                 }
                 .keyboardShortcut(.tab, modifiers: .control)
                 .disabled(!tabs.canCycleTabs)
 
-                Button("Select Previous Tab") {
+                Button("选择上一个标签页") {
                     tabs.selectPreviousTab()
                 }
                 .keyboardShortcut(.tab, modifiers: [.control, .shift])
                 .disabled(!tabs.canCycleTabs)
             }
 
-            CommandMenu("Go") {
-                Button("Back") {
+            CommandMenu("前往") {
+                Button("后退") {
                     model.goBack()
                 }
                 .keyboardShortcut("[", modifiers: .command)
                 .disabled(!model.canGoBack)
 
-                Button("Forward") {
+                Button("前进") {
                     model.goForward()
                 }
                 .keyboardShortcut("]", modifiers: .command)
                 .disabled(!model.canGoForward)
 
-                Button("Enclosing Folder") {
+                Button("上一级文件夹") {
                     model.goUp()
                 }
                 .keyboardShortcut(.upArrow, modifiers: .command)
                 .disabled(!model.canGoUp)
 
-                Button("Go to Folder...") {
+                Button("前往文件夹…") {
                     model.showGoToFolder()
                 }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
 
                 Divider()
 
-                Button("Home") {
+                Button("主目录") {
                     model.navigate(to: FileManager.default.homeDirectoryForCurrentUser)
                 }
                 .keyboardShortcut("h", modifiers: [.command, .shift])
 
-                Button("Downloads") {
+                Button("下载") {
                     model.navigate(to: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads"))
                 }
 
                 Divider()
 
-                Button("Connect to Server") {
+                Button("连接服务器") {
                     model.showConnectToServer()
                 }
                 .keyboardShortcut("k", modifiers: .command)
             }
 
-            CommandMenu("Tools") {
-                Toggle("Integrated Terminal", isOn: Binding(
+            CommandMenu("工具") {
+                Toggle("内置终端", isOn: Binding(
                     get: { model.isIntegratedTerminalPresented },
                     set: { model.isIntegratedTerminalPresented = $0 }
                 ))
@@ -234,19 +234,19 @@ struct MaXplorerApp: App {
 
                 Divider()
 
-                Button("Open in Terminal") {
+                Button("在终端中打开") {
                     model.openSelectedInTerminal()
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
 
-                Button("Copy Path") {
+                Button("复制路径") {
                     model.copySelectedPath()
                 }
                 .keyboardShortcut("c", modifiers: [.command, .option])
             }
 
             CommandGroup(after: .help) {
-                Button("MaXplorer README") {
+                Button("MaXplorer 使用说明") {
                     model.showReadme()
                 }
             }

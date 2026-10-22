@@ -18,10 +18,10 @@ enum AppInfo {
     }()
 
     static var versionSummary: String {
-        "Version \(shortVersion) (\(buildNumber))"
+        "版本 \(shortVersion)（\(buildNumber)）"
     }
 
-    static let tagline = "A native macOS file manager with Windows Explorer-style navigation and a modern Mac feel."
+    static let tagline = "原生 macOS 文件管理器，结合 Windows 资源管理器式导航与现代 Mac 操作体验。"
 }
 
 /// Modern, glass-forward About surface rendered directly on the main app
@@ -41,7 +41,7 @@ struct AboutView: View {
 
                 actions
 
-                Text("MaXplorer - Crafted by Adi Sapir (github.com/adisapir)")
+                Text("MaXplorer · 作者：Adi Sapir（github.com/adisapir）")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -97,7 +97,7 @@ struct AboutView: View {
             Button {
                 isChangelogPresented = true
             } label: {
-                Label("View Changelog", systemImage: "clock.arrow.circlepath")
+                Label("查看更新记录", systemImage: "clock.arrow.circlepath")
                     .font(.headline)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -108,7 +108,7 @@ struct AboutView: View {
             Button {
                 isReadmePresented = true
             } label: {
-                Label("README", systemImage: "doc.text")
+                Label("使用说明", systemImage: "doc.text")
                     .font(.headline)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -119,7 +119,7 @@ struct AboutView: View {
             Button {
                 model.dismissAuxiliaryDetail()
             } label: {
-                Text("OK")
+                Text("确定")
                     .font(.headline)
                     .frame(minWidth: 64)
                     .padding(.horizontal, 10)
@@ -196,9 +196,9 @@ extension AppInfo {
 /// Loads the bundled `ChangeLog.md` copied in by a build phase.
 enum ChangelogLoader {
     static func load() -> String {
-        guard let url = Bundle.main.url(forResource: "ChangeLog", withExtension: "md"),
+        guard let url = Bundle.main.url(forResource: "ChangeLog-zh", withExtension: "md"),
               let contents = try? String(contentsOf: url, encoding: .utf8) else {
-            return "# Change Log\n\nNo changelog is available in this build."
+            return "# 更新记录\n\n此构建未附带更新记录。"
         }
 
         return contents
@@ -219,12 +219,12 @@ private struct ChangelogSheet: View {
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(Color.accentColor)
 
-                Text("Change Log")
+                Text("更新记录")
                     .font(.headline)
 
                 Spacer(minLength: 16)
 
-                Button("Done", action: onClose)
+                Button("完成", action: onClose)
                     .keyboardShortcut(.defaultAction)
             }
             .padding(16)
@@ -323,9 +323,9 @@ enum ChangelogParser {
 /// Loads the bundled `README.md` copied in by a build phase.
 enum ReadmeLoader {
     static func load() -> String {
-        guard let url = Bundle.main.url(forResource: "README", withExtension: "md"),
+        guard let url = Bundle.main.url(forResource: "Help-zh", withExtension: "md"),
               let contents = try? String(contentsOf: url, encoding: .utf8) else {
-            return "# README\n\nNo README is available in this build."
+            return "# 使用说明\n\n此构建未附带使用说明。"
         }
         return contents
     }
@@ -345,12 +345,12 @@ struct ReadmeSheet: View {
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(Color.accentColor)
 
-                Text("README")
+                Text("使用说明")
                     .font(.headline)
 
                 Spacer(minLength: 16)
 
-                Button("Done", action: onClose)
+                Button("完成", action: onClose)
                     .keyboardShortcut(.defaultAction)
             }
             .padding(16)
@@ -371,44 +371,3 @@ struct ReadmeSheet: View {
 
 /// Applies normal macOS window resizing to a SwiftUI sheet while preserving
 /// the viewer's minimum usable content size.
-private struct ResizableSheetWindowBridge: NSViewRepresentable {
-    let minSize: NSSize
-
-    func makeNSView(context: Context) -> ResizableSheetWindowView {
-        ResizableSheetWindowView(minSize: minSize)
-    }
-
-    func updateNSView(_ nsView: ResizableSheetWindowView, context: Context) {
-        nsView.minSize = minSize
-        nsView.configureWindow()
-    }
-}
-
-private final class ResizableSheetWindowView: NSView {
-    var minSize: NSSize
-
-    init(minSize: NSSize) {
-        self.minSize = minSize
-        super.init(frame: .zero)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        configureWindow()
-    }
-
-    func configureWindow() {
-        guard let window else {
-            return
-        }
-
-        window.styleMask.insert(.resizable)
-        window.contentMinSize = minSize
-        window.standardWindowButton(.zoomButton)?.isEnabled = true
-    }
-}
