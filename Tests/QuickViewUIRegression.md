@@ -75,3 +75,36 @@ Checks performed through native computer use:
 Validation: full Debug build and strict signature verification passed; the existing command-line suite passed 33 tests with 0 failures. Cross-volume tests were not rerun because the file-operation engine changed only in error wording. These checks do not reclassify any earlier legacy-provider limitation.
 
 Compact candidate, build/test receipts, and translation audit: `/Users/long/Code/文件管理器/research/2026-10-22/chinese-ui`.
+
+
+## Independent preview window and display placement: 2026-10-22
+
+This acceptance supersedes the earlier sheet-size implementation and its unresolved upper-edge behavior. A sheet remains attached to its browser window; setting its resizable style alone did not make its upper edge freely draggable. Quick View now uses a separate standard NSWindow with native resizing. Quick Look still receives the original URL. The hosting controller does not impose intrinsic content sizing on the window.
+
+Repeatable checks:
+
+1. Open a document with Space. Drag the upper edge both upward and downward. Also exercise left/right/bottom edges and all four corners, checking content reflow and minimum dimensions.
+2. Use the system Zoom Window action. Change a text preview from Automatic to UTF-8; the new content must not reset the window dimensions.
+3. Close with Escape, Done, Command-W, and the native close button; reopen with Space. Close the owning browser window and check that its preview disappears.
+4. Verify an encrypted workbook's wrong-password retry and successful Return submission. The preview must stay open for both operations.
+5. With physical displays, open from each display, move between displays of different sizes/scales, rearrange displays, and disconnect the display containing the preview. All window chrome must remain reachable after fitting. Do not equate pure geometry tests with these physical checks.
+
+Recorded results:
+
+| Check | Evidence and result |
+| --- | --- |
+| Upper-edge resizing | PASS by the user's direct manual confirmation: dragging both up and down works. Retina capture changed from 2400 × 1704 to 2134 × 1630 pixels after manual resizing. The one-line close-state follow-up does not change resizing code. |
+| Other edges/corners | Automation attempted right and bottom-right dragging but did not establish a size change; outside-border coordinates returned windowNotFoundAtPosition. These are not recorded as individual PASS results. |
+| Native Zoom Window | PASS: 4032 × 2346 pixel capture, content remains visible. |
+| Size retained on text encoding change | PASS: 4032 × 2346 before and after switching to UTF-8. |
+| Escape, Command-W, repeated Space | PASS through native computer use; text preview reopened correctly. |
+| Owner closure | PASS: after closing the owning browser window, Window menu contains no orphan Quick View entry. |
+| Encrypted Excel | PASS on final rebuilt candidate: wrong password retains window with Chinese retry text; correct synthetic password plus Return reveals Chinese rows and total 350.75. |
+| Physical dual-display / unplug | NOT PROVEN: user confirmed there is no second display available. |
+| Display geometry | PASS: 7 automated tests, including owner-display opening, left/right/above/below layouts and negative coordinates; small/short/Retina point bounds; preserved user geometry; overlap-based destination selection; large-to-small fitting; removal fallback; repeated-notification stability. |
+
+The coordinator fits only after dragging/resizing finishes and removes observers when it closes. Closing cancels the selection known at that time, including a queued replacement; the deferred clear checks its UUID so a later request survives. Independent read-only review identified this pending-selection boundary; the follow-up fix was reviewed and accepted.
+
+Validation: full Debug build and strict signature verification passed. The command-line suite passed 40 tests with 0 failures (33 existing plus 7 geometry tests). No file-operation engine behavior changed, so cross-volume tests were not rerun. The only build warning was skipped AppIntents metadata extraction. Native UI checks and the user's manual confirmation are separate from unattended automated test results.
+
+Compact exact-candidate manifest, command logs, and acceptance receipt: `/Users/long/Code/文件管理器/research/2026-10-22/preview-window`.

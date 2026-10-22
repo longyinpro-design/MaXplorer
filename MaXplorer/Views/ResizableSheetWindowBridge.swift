@@ -3,27 +3,22 @@ import SwiftUI
 
 struct ResizableSheetWindowBridge: NSViewRepresentable {
     let minSize: NSSize
-    var initialSize: NSSize? = nil
 
     func makeNSView(context: Context) -> ResizableSheetWindowView {
-        ResizableSheetWindowView(minSize: minSize, initialSize: initialSize)
+        ResizableSheetWindowView(minSize: minSize)
     }
 
     func updateNSView(_ nsView: ResizableSheetWindowView, context: Context) {
         nsView.minSize = minSize
-        nsView.initialSize = initialSize
         nsView.configureWindow()
     }
 }
 
 final class ResizableSheetWindowView: NSView {
     var minSize: NSSize
-    var initialSize: NSSize?
-    private weak var sizedWindow: NSWindow?
 
-    init(minSize: NSSize, initialSize: NSSize?) {
+    init(minSize: NSSize) {
         self.minSize = minSize
-        self.initialSize = initialSize
         super.init(frame: .zero)
     }
 
@@ -45,13 +40,6 @@ final class ResizableSheetWindowView: NSView {
         window.styleMask.insert(.resizable)
         window.contentMinSize = minSize
         window.standardWindowButton(.zoomButton)?.isEnabled = true
-        guard let initialSize, sizedWindow !== window else { return }
-        sizedWindow = window
-        // SwiftUI gives Quick Look its intrinsic minimum width. Set the requested
-        // opening size after attachment, once, so later user resizing is preserved.
-        DispatchQueue.main.async { [weak self, weak window] in
-            guard let self, let window, self.window === window else { return }
-            window.setContentSize(initialSize)
-        }
+
     }
 }

@@ -20,7 +20,8 @@ if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
         "$repo/MaXplorer/Services/PreviewTextDecoder.swift"
         "$repo/MaXplorer/Models/FileItem.swift"
         "$repo/MaXplorer/Models/FinderTag.swift"
-        "$repo/MaXplorer/Models/QuickViewContent.swift")
+        "$repo/MaXplorer/Models/QuickViewContent.swift"
+        "$repo/MaXplorer/Models/PreviewWindowPlacement.swift")
 fi
 printf 'Test receipt: %s\n' "$run"
 xcrun swiftc -parse-as-library -swift-version 5 -default-isolation MainActor -warnings-as-errors \
