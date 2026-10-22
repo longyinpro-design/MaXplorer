@@ -147,7 +147,7 @@ final class CopyQueueViewModel: ObservableObject {
             }
 
             let destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
-            let destinationExists = FileManager.default.fileExists(atPath: destination.path)
+            let destinationExists = SafeFileOperations.entryExists(at: destination)
             if destinationExists, shouldSkip {
                 return nil
             }
@@ -238,20 +238,16 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     func cancel(_ itemID: CopyQueueItem.ID) {
-        tasks[itemID]?.cancel()
-        tasks[itemID] = nil
-
-        guard let index = items.firstIndex(where: { $0.id == itemID }) else {
+        guard let item = items.first(where: { $0.id == itemID }), item.state.isActive else {
             return
         }
-
-        guard items[index].state.isActive else {
-            return
+        if item.state == .running {
+            // Keep ownership and the running slot until the worker acknowledges
+            // cancellation, or finishes a publication that already committed.
+            tasks[itemID]?.cancel()
+        } else {
+            markCancelled(itemID)
         }
-
-        items.remove(at: index)
-        aggregateFinishedItemCount += 1
-        startAvailableCopies()
     }
 
     private func startAvailableCopies() {
@@ -416,7 +412,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 }
 
-private final class CopyProgressUpdateThrottle: @unchecked Sendable {
+nonisolated private final class CopyProgressUpdateThrottle: @unchecked Sendable {
     private let lock = NSLock()
     private var lastPublishTime = Date.distantPast
 
@@ -434,264 +430,4 @@ private final class CopyProgressUpdateThrottle: @unchecked Sendable {
     }
 }
 
-private enum CopyWorker {
-    /// SMB metadata and streaming calls can monopolize several kernel worker
-    /// threads at once even when Swift tasks use a low priority. Keep remote
-    /// filesystem work on one lane so AppKit input and drawing stay responsive.
-    nonisolated private static let networkIOLock = NSLock()
-
-    static func totalByteCount(for url: URL) async throws -> Int64 {
-        let worker = Task.detached(priority: .background) {
-            try withNetworkIOLaneIfNeeded(for: [url]) {
-                try byteCount(for: url)
-            }
-        }
-        return try await withTaskCancellationHandler {
-            try await worker.value
-        } onCancel: {
-            worker.cancel()
-        }
-    }
-
-    static func perform(
-        _ operation: CopyQueueOperation,
-        sourceURL: URL,
-        destinationURL: URL,
-        overwrite: Bool,
-        progress: @escaping @Sendable (Int64) -> Void
-    ) async throws {
-        let worker = Task.detached(priority: .background) {
-            let destinationDirectory = destinationURL.deletingLastPathComponent()
-            let isNetworkTransfer = usesRemoteMountedVolume([sourceURL, destinationDirectory])
-            try withNetworkIOLane(isRequired: isNetworkTransfer) {
-                if operation == .move,
-                   try !requiresCopyForMove(from: sourceURL, to: destinationDirectory) {
-                    if FileManager.default.fileExists(atPath: destinationURL.path), overwrite {
-                        try FileManager.default.removeItem(at: destinationURL)
-                    }
-                    do {
-                        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
-                        progress(try byteCount(for: destinationURL))
-                        return
-                    } catch {
-                        guard isCrossDeviceMoveError(error) else {
-                            throw error
-                        }
-                    }
-                }
-
-                var copiedBytes: Int64 = 0
-                let destinationExistedBeforeCopy = FileManager.default.fileExists(atPath: destinationURL.path)
-                do {
-                    try copyItem(
-                        sourceURL,
-                        to: destinationURL,
-                        overwrite: overwrite,
-                        isNetworkTransfer: isNetworkTransfer,
-                        copiedBytes: &copiedBytes,
-                        progress: progress
-                    )
-                } catch {
-                    // A failed or cancelled transfer must not leave an item
-                    // that looks complete at the destination. Preserve only a
-                    // pre-existing destination that this transfer never owned.
-                    if !destinationExistedBeforeCopy || overwrite {
-                        try? FileManager.default.removeItem(at: destinationURL)
-                    }
-                    throw error
-                }
-
-                if operation == .move {
-                    do {
-                        try FileManager.default.removeItem(at: sourceURL)
-                    } catch {
-                        try? FileManager.default.removeItem(at: destinationURL)
-                        throw error
-                    }
-                }
-            }
-        }
-        try await withTaskCancellationHandler {
-            try await worker.value
-        } onCancel: {
-            worker.cancel()
-        }
-    }
-
-    nonisolated private static func withNetworkIOLaneIfNeeded<T>(
-        for urls: [URL],
-        operation: () throws -> T
-    ) throws -> T {
-        try withNetworkIOLane(isRequired: usesRemoteMountedVolume(urls), operation: operation)
-    }
-
-    nonisolated private static func withNetworkIOLane<T>(
-        isRequired: Bool,
-        operation: () throws -> T
-    ) throws -> T {
-        guard isRequired else {
-            return try operation()
-        }
-
-        networkIOLock.lock()
-        defer { networkIOLock.unlock() }
-        try Task.checkCancellation()
-        return try operation()
-    }
-
-    nonisolated private static func usesRemoteMountedVolume(_ urls: [URL]) -> Bool {
-        urls.contains { url in
-            let values = try? url.resourceValues(forKeys: [.volumeURLKey, .volumeIsLocalKey])
-            if let isLocal = values?.volumeIsLocal {
-                return !isLocal
-            }
-            guard let volumeURL = values?.volume else {
-                return false
-            }
-            return (try? volumeURL.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) == false
-        }
-    }
-
-    nonisolated private static func requiresCopyForMove(
-        from sourceURL: URL,
-        to destinationDirectory: URL
-    ) throws -> Bool {
-        let sourceVolume = try sourceURL.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier
-        let destinationVolume = try destinationDirectory.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier
-        guard let sourceVolume, let destinationVolume else {
-            return false
-        }
-        guard let sourceObject = sourceVolume as? NSObject,
-              let destinationObject = destinationVolume as? NSObject else {
-            return String(describing: sourceVolume) != String(describing: destinationVolume)
-        }
-        return !sourceObject.isEqual(destinationObject)
-    }
-
-    nonisolated private static func isCrossDeviceMoveError(_ error: Error) -> Bool {
-        let nsError = error as NSError
-        if nsError.domain == NSPOSIXErrorDomain, nsError.code == Int(EXDEV) {
-            return true
-        }
-
-        guard let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error else {
-            return false
-        }
-        return isCrossDeviceMoveError(underlyingError)
-    }
-
-    nonisolated private static func byteCount(for url: URL) throws -> Int64 {
-        try Task.checkCancellation()
-
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            return 0
-        }
-
-        if isDirectory.boolValue {
-            guard let enumerator = FileManager.default.enumerator(
-                at: url,
-                includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
-                options: [.skipsHiddenFiles]
-            ) else {
-                return 0
-            }
-
-            var totalBytes: Int64 = 0
-            while let childURL = enumerator.nextObject() as? URL {
-                try Task.checkCancellation()
-                let values = try childURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
-                if values.isDirectory != true {
-                    totalBytes += Int64(values.fileSize ?? 0)
-                }
-            }
-            return totalBytes
-        }
-
-        let values = try url.resourceValues(forKeys: [.fileSizeKey])
-        return Int64(values.fileSize ?? 0)
-    }
-
-    nonisolated private static func copyItem(
-        _ sourceURL: URL,
-        to destinationURL: URL,
-        overwrite: Bool,
-        isNetworkTransfer: Bool,
-        copiedBytes: inout Int64,
-        progress: @escaping @Sendable (Int64) -> Void
-    ) throws {
-        try Task.checkCancellation()
-
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDirectory) else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-
-        if isDirectory.boolValue {
-            if FileManager.default.fileExists(atPath: destinationURL.path), overwrite {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
-
-            if !FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.createDirectory(at: destinationURL, withIntermediateDirectories: true)
-            }
-
-            let children = try FileManager.default.contentsOfDirectory(
-                at: sourceURL,
-                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-                options: []
-            )
-
-            for child in children {
-                try copyItem(
-                    child,
-                    to: destinationURL.appendingPathComponent(child.lastPathComponent),
-                    overwrite: overwrite,
-                    isNetworkTransfer: isNetworkTransfer,
-                    copiedBytes: &copiedBytes,
-                    progress: progress
-                )
-            }
-            return
-        }
-
-        try FileManager.default.createDirectory(
-            at: destinationURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            if overwrite {
-                try FileManager.default.removeItem(at: destinationURL)
-            } else {
-                throw CocoaError(.fileWriteFileExists)
-            }
-        }
-
-        let sourceHandle = try FileHandle(forReadingFrom: sourceURL)
-        defer {
-            try? sourceHandle.close()
-        }
-
-        FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
-        let destinationHandle = try FileHandle(forWritingTo: destinationURL)
-        defer {
-            try? destinationHandle.close()
-        }
-
-        while true {
-            try Task.checkCancellation()
-            let data = try sourceHandle.read(upToCount: 1024 * 1024) ?? Data()
-            guard !data.isEmpty else {
-                break
-            }
-
-            try destinationHandle.write(contentsOf: data)
-            copiedBytes += Int64(data.count)
-            progress(copiedBytes)
-            if isNetworkTransfer {
-                Thread.sleep(forTimeInterval: 0.001)
-            }
-        }
-    }
-}
+typealias CopyWorker = SafeFileOperations

@@ -904,7 +904,7 @@ final class FileBrowserViewModel: ObservableObject {
 
         for (index, source) in sources.enumerated() {
             let destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
-            if FileManager.default.fileExists(atPath: destination.path) {
+            if SafeFileOperations.entryExists(at: destination) {
                 conflictIndices.append(index)
             } else {
                 approvedSources.append(source)
