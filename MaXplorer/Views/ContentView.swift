@@ -309,6 +309,7 @@ private struct QuickViewSheet: View {
     @State private var textEncoding: PreviewTextEncoding = .automatic
     @State private var decodedText: String?
     @State private var decodingError: String?
+    @State private var openError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -331,11 +332,26 @@ private struct QuickViewSheet: View {
 
                 Spacer(minLength: 16)
 
+                Button("Open in Default App") {
+                    if !NSWorkspace.shared.open(content.url) {
+                        openError = "No application could open this file. Check that a compatible application is installed."
+                    }
+                }
+
                 Button("Done", action: onClose)
-                    .keyboardShortcut(.defaultAction)
+                    // Return belongs to the system preview's password field.
+                    .keyboardShortcut(.cancelAction)
             }
             .padding(16)
             .background(ThemedBarBackground())
+
+            if content.isLegacyOfficeDocument {
+                Text("Some older Office files or encryption methods may not preview correctly. If content is missing or a known password is rejected, choose Open in Default App.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+            }
 
             if content.allowsTextEncoding {
                 Picker("Text encoding", selection: $textEncoding) {
@@ -365,6 +381,14 @@ private struct QuickViewSheet: View {
             .background(ThemedContentBackground())
         }
         .frame(minWidth: 680, minHeight: 460)
+        .alert("Unable to Open File", isPresented: Binding(
+            get: { openError != nil },
+            set: { if !$0 { openError = nil } }
+        )) {
+            Button("OK") { openError = nil }
+        } message: {
+            Text(openError ?? "")
+        }
         .task(id: textEncoding) {
             decodedText = nil
             decodingError = nil
