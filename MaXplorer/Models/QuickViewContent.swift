@@ -5,5 +5,5 @@ struct QuickViewContent: Identifiable {
     let url: URL
     let title: String
     let detail: String
-    let text: String
+    let allowsTextEncoding: Bool
 }

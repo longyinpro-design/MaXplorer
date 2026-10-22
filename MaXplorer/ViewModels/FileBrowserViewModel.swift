@@ -32,7 +32,6 @@ final class FileClipboard: ObservableObject {
 
 @MainActor
 final class FileBrowserViewModel: ObservableObject {
-    private static let maximumQuickViewBytes = 10 * 1024 * 1024
     private static let networkRootURL = URL(string: "maxplorer://network")!
 
     @Published private(set) var currentURL: URL
@@ -577,10 +576,7 @@ final class FileBrowserViewModel: ObservableObject {
 
         Task {
             do {
-                quickViewContent = try await fileSystem.quickViewContent(
-                    for: selectedItem.url,
-                    maximumBytes: Self.maximumQuickViewBytes
-                )
+                quickViewContent = try await fileSystem.quickViewContent(for: selectedItem.url)
             } catch {
                 errorMessage = error.localizedDescription
             }

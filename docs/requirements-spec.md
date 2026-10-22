@@ -348,7 +348,7 @@ File actions:
 - Open selected folders inside MaXplorer, including alias folders resolved to their target.
 - Open selected non-folder items with the system default application.
 - Context menu actions for Open, Quick View, Open With, Cut, Copy, Rename, Move to Trash, Add to Favorites, Copy Path, Open in Terminal, and Reveal in Finder.
-- Quick View displays local file text in an app popup, strips non-displayable binary bytes when needed, and does not load buffers larger than 10 MB.
+- Quick View displays local files in an app popup using macOS Quick Look. It passes the original file URL to the system provider, preserving document/image formats and text encoding instead of filtering bytes into ASCII. Unsupported formats use the system fallback; Automatic mode delegates loading to the system without the former 10 MB cap. Plain text and source files also offer explicit UTF-8, UTF-16, GB18030/GBK and Big5 decoding for ambiguous encodings, bounded to a 10 MB read and reporting invalid bytes without stripping them.
 - Open With lists applications returned by macOS for the selected item and opens the item with the chosen application.
 - New Folder, Rename, Move to Trash, copy, cut, and paste.
 - Copy queue with progress, speed, ETA, cancellation, copy conflict detection, overwrite/skip/cancel choices, and configurable concurrency.

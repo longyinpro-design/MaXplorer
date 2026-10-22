@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 struct VolumeCapacityStats: Equatable, Sendable {
     let used: UInt64
@@ -62,7 +63,7 @@ protocol FileSystemService: Sendable {
     func moveItems(_ resolvedItems: [(source: URL, shouldOverwrite: Bool)], to directory: URL) async throws -> [URL]
     func moveToTrash(_ url: URL) async throws
     func deletePermanently(_ url: URL) async throws
-    func quickViewContent(for url: URL, maximumBytes: Int) async throws -> QuickViewContent
+    func quickViewContent(for url: URL) async throws -> QuickViewContent
 }
 
 extension FileSystemService {
@@ -189,33 +190,29 @@ struct LocalFileSystemService: FileSystemService {
         }.value
     }
 
-    func quickViewContent(for url: URL, maximumBytes: Int) async throws -> QuickViewContent {
+    func quickViewContent(for url: URL) async throws -> QuickViewContent {
         try await Task.detached(priority: .userInitiated) {
-            let values = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey, .isPackageKey])
-            let typeDescription = (try? url.resourceValues(forKeys: [.localizedTypeDescriptionKey]).localizedTypeDescription) ?? "File"
-            guard values.isDirectory != true, values.isPackage != true else {
-                throw FileSystemError.previewUnavailable("Quick View is available for files, not folders or packages.")
+            let values = try url.resourceValues(forKeys: [
+                .fileSizeKey, .isRegularFileKey, .isDirectoryKey, .isPackageKey, .isReadableKey,
+                .localizedTypeDescriptionKey, .contentTypeKey
+            ])
+            guard values.isRegularFile == true, values.isDirectory != true, values.isPackage != true else {
+                throw FileSystemError.previewUnavailable("Quick View is available for regular files, not folders or packages.")
+            }
+            guard values.isReadable == true else {
+                throw FileSystemError.previewUnavailable("This file cannot be read. Check its permissions and try again.")
             }
 
-            let fileSize = values.fileSize ?? 0
-            guard fileSize <= maximumBytes else {
-                let limit = ByteCountFormatter.string(fromByteCount: Int64(maximumBytes), countStyle: .file)
-                let size = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
-                return QuickViewContent(
-                    url: url,
-                    title: url.lastPathComponent,
-                    detail: "\(typeDescription) • \(size)",
-                    text: "Preview skipped because this file is larger than \(limit)."
-                )
-            }
-
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-            let text = Self.displayableText(from: data)
+            // Quick Look receives the original file. Never reinterpret document/image bytes
+            // as text, or strip bytes from a text encoding we do not recognize.
+            let typeDescription = values.localizedTypeDescription ?? "File"
+            let size = ByteCountFormatter.string(fromByteCount: Int64(values.fileSize ?? 0), countStyle: .file)
             return QuickViewContent(
                 url: url,
                 title: url.lastPathComponent,
-                detail: "\(typeDescription) • \(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))",
-                text: text.isEmpty ? "No displayable characters found." : text
+                detail: "\(typeDescription) • \(size)",
+                allowsTextEncoding: values.contentType?.conforms(to: .plainText) == true
+                    || values.contentType?.conforms(to: .sourceCode) == true
             )
         }.value
     }
@@ -321,30 +318,7 @@ struct LocalFileSystemService: FileSystemService {
         return Calendar.current.date(from: dateComponents)
     }
 
-    nonisolated private static func displayableText(from data: Data) -> String {
-        if let text = String(data: data, encoding: .utf8), !containsControlCharacters(in: text) {
-            return text
-        }
 
-        let scalars = data.compactMap { byte -> UnicodeScalar? in
-            switch byte {
-            case 9, 10, 13:
-                return UnicodeScalar(byte)
-            case 32...126:
-                return UnicodeScalar(byte)
-            default:
-                return nil
-            }
-        }
-
-        return String(String.UnicodeScalarView(scalars))
-    }
-
-    nonisolated private static func containsControlCharacters(in text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in
-            scalar.value < 32 && scalar != "\n" && scalar != "\r" && scalar != "\t"
-        }
-    }
 }
 
 enum FileSystemError: LocalizedError {

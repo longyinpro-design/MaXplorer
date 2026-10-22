@@ -17,6 +17,7 @@ sources=("$repo/MaXplorer/ViewModels/CopyQueueViewModel.swift")
 if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
     sources+=("$repo/MaXplorer/Services/SafeFileOperations.swift"
         "$repo/MaXplorer/Services/FileSystemService.swift"
+        "$repo/MaXplorer/Services/PreviewTextDecoder.swift"
         "$repo/MaXplorer/Models/FileItem.swift"
         "$repo/MaXplorer/Models/FinderTag.swift"
         "$repo/MaXplorer/Models/QuickViewContent.swift")

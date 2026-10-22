@@ -98,6 +98,7 @@ nonisolated func expect(_ condition: @autoclosure () -> Bool, _ message: String)
             try expect((try? fm.destinationOfSymbolicLink(atPath: target.path)) == "missing", "dangling link lost")
         }
         await extendedTests()
+        await quickViewTests()
         print("RESULT passed=\(passed) failed=\(failed)")
         if failed != 0 || passed == 0 { exit(1) }
     }

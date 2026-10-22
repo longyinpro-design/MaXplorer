@@ -306,6 +306,9 @@ private struct ActiveBrowserView: View {
 private struct QuickViewSheet: View {
     let content: QuickViewContent
     let onClose: () -> Void
+    @State private var textEncoding: PreviewTextEncoding = .automatic
+    @State private var decodedText: String?
+    @State private var decodingError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -334,17 +337,49 @@ private struct QuickViewSheet: View {
             .padding(16)
             .background(ThemedBarBackground())
 
-            ScrollView {
-                Text(content.text)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(16)
+            if content.allowsTextEncoding {
+                Picker("Text encoding", selection: $textEncoding) {
+                    ForEach(PreviewTextEncoding.allCases) { encoding in
+                        Text(encoding.rawValue).tag(encoding)
+                    }
+                }
+                .fixedSize()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
+
+            Group {
+                if textEncoding == .automatic {
+                    FilePreviewView(url: content.url)
+                } else {
+                    ScrollView {
+                        Text(decodedText ?? decodingError ?? "Loading…")
+                            .font(.system(size: 12, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .padding(16)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(ThemedContentBackground())
         }
         .frame(minWidth: 680, minHeight: 460)
+        .task(id: textEncoding) {
+            decodedText = nil
+            decodingError = nil
+            guard let encoding = textEncoding.stringEncoding else { return }
+            let url = content.url
+            do {
+                let text = try await Task.detached(priority: .userInitiated) {
+                    try PreviewTextDecoder.read(url, encoding: encoding)
+                }.value
+                try Task.checkCancellation()
+                decodedText = text
+            } catch {
+                if !Task.isCancelled { decodingError = error.localizedDescription }
+            }
+        }
     }
 }
 
