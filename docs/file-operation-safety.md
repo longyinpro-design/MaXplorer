@@ -6,7 +6,7 @@ This slice replaces the queue and service's destructive overwrite paths with one
 
 - Implementation and independent read-only review: complete; the one review finding was reproduced, fixed, and re-reviewed.
 - Regression suite: **30 PASS / 0 FAIL**, including a real second APFS filesystem.
-- Full Xcode application build: **BLOCKED**, exit 69 before compilation because the installed Xcode license has not been accepted. No app launch, signing, packaging, or release acceptance is claimed.
+- Full Xcode Debug application build and local startup smoke acceptance: **PASS** after the user accepted the Xcode license. Built with Xcode 27.1 (`27A9275`) and local ad-hoc signing; strict code-signature verification passed. No packaging, notarization, or release acceptance is claimed.
 - Upstream base: `542f2bba70d1b41227f3134750c1d724a9f7646e`.
 - Seven-file implementation/test manifest SHA-256: `7e4700fa36e4c02f6f6e8ac77fe01d0ff5cf7933c7e0a774cb932813e90155bb`.
 
@@ -58,7 +58,9 @@ Environment: macOS 27.0.1 (`26A434`), arm64, Apple Swift 6.4 (`swiftlang-6.4.0.3
 | Independent review finding reproduced: in-place edit of old target's nested file | `file-operation-tests/20261022T104653-66842/tests.log` | 0 PASS / 1 FAIL |
 | Final candidate, all regressions and real cross-volume tests | `file-operation-tests/20261022T104721-67637/tests.log` | 30 PASS / 0 FAIL |
 | Final core compilation, warnings treated as errors | `file-operation-tests/20261022T104721-67637/compile.log` | PASS, no diagnostics |
-| Full Xcode build attempt | `full-app-build.log` | BLOCKED, license not accepted |
+| Initial full Xcode build attempt | `full-app-build.log` | Initially blocked by license; resolved below |
+| Full Debug app build after user accepted license | `app-validation/20261022T113024-4514/build.log` | BUILD SUCCEEDED |
+| Local code signature verification | `app-validation/20261022T113024-4514/signature.log` | PASS |
 
 The final tests cover overwrite failure preservation; self/parent/hardlink aliases; descendant and ancestor rejection; files, directories, symlinks, dangling links, hidden children, ACLs, resource forks, timestamps and ordinary permissions; recursive read errors; FIFO rejection; pre/post-publication cancellation; source and destination edits, including a nested in-place edit; concurrent exclusive publication; service routing; queue cancellation ownership; actual cross-volume movement and source removal failure. Independent review matched the final manifest and closed its sole finding.
 
@@ -68,4 +70,19 @@ The final tests cover overwrite failure preservation; self/parent/hardlink alias
 - Metadata checks detect observed ordinary edits, but cannot eliminate external changes in the interval between a final check and rename/removal. Hostile external mutation is outside this acceptance boundary.
 - Native copying does not preserve hardlink topology, and does not enable preservation of setuid/setgid privilege bits. Copying source owners across accounts and special filesystem objects is not promised.
 - Permission-restoration and post-publication backup-cleanup failures have explicit retention paths, but those rare branches have not been fault-injected in this suite.
-- Complete application integration remains unverified until the user reviews and accepts the Xcode license and a full build can run. The new service is included by the project's existing filesystem-synchronized source group.
+- Complete Debug application compilation and the focused UI flow below passed. This is local ad-hoc acceptance; Xcode disables Hardened Runtime for this signing mode. Distribution signing, notarization, and the remaining product features have not been accepted.
+
+## Full application startup acceptance (2026-10-22)
+
+The application source remained exactly at `226ad341652d416238a748feb438b8d795b09974`; its seven-file regression manifest above was unchanged. The built bundle is `DerivedData/Build/Products/Debug/MaXplorer.app` under the receipt root above, bundle ID `doccolabs.MaXplorer`, version `1.09`. A running process was matched to this exact bundle path. The main window and Home listing loaded successfully. The only build warning was skipped AppIntents metadata extraction because this app has no AppIntents dependency; there were no application compiler warnings.
+
+Native UI acceptance used `app-validation/ui-smoke-20261022` exclusively for file operations. Go to Folder navigation passed. Copying `probe.txt` first exercised Skip, preserving the old destination hash, then Overwrite, producing the source hash while retaining the source. Cut/Paste moved `move.txt`, removing its old path and preserving exact content at the destination. Copy Queue visibly showed `Copied`, `Moved`, and `0 active`; filesystem checks found no staging residue. The app and the tiny fixture were retained for the user to inspect. Existing user tabs were preserved.
+
+The reproducible entrypoint is `script/build_and_run.sh`, also wired to the Codex Run action. It routes build outputs and package caches through agent-storage, builds Debug with local ad-hoc signing, and verifies the bundle signature. Default mode launches the bundle; `--build-only` was the exercised build mode, followed by native UI launch and inspection. `--verify`, `--logs`, and `--debug` are available for future use. Only a running instance whose executable exactly matches this build is stopped by the default relaunch path.
+
+```sh
+./script/build_and_run.sh --build-only
+./script/build_and_run.sh
+```
+
+A compact local proof copy, including byte-level UI checks and the build log, is retained at `/Users/long/Code/文件管理器/research/2026-10-22/safety-stage/receipts/app-ui-validation.json`.
