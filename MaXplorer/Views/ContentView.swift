@@ -1882,6 +1882,13 @@ private struct FileTableView: View {
                 .width(min: 100, ideal: 140)
                 .customizationID(FileColumn.owner.id)
             }
+            .onKeyPress(.space, phases: .down) { press in
+                guard press.modifiers.isEmpty, model.canQuickViewSelectedItem else {
+                    return .ignored
+                }
+                model.quickViewSelectedItem()
+                return .handled
+            }
             .alternatingRowBackgrounds(settings.showsBandedFileRows ? .enabled : .disabled)
             .listRowSeparator(settings.showsBandedFileRows ? .visible : .hidden)
             .scrollContentBackground(.hidden)
@@ -1909,7 +1916,6 @@ private struct FileTableView: View {
                     model.selectedItemIDs = selection
                     model.quickViewSelectedItem()
                 }
-                .keyboardShortcut(.space, modifiers: [])
                 .disabled(!canQuickView(selection: selection))
 
                 Menu("Open With") {
@@ -2255,6 +2261,17 @@ private final class TableCellClickTargetNSView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        // This overlay handles selection itself, so native table mouseDown never
+        // gets a chance to transfer focus away from a text field or terminal.
+        var ancestor = superview
+        while let view = ancestor {
+            if let table = view as? NSTableView {
+                window?.makeFirstResponder(table)
+                break
+            }
+            ancestor = view.superview
+        }
+
         if event.modifierFlags.contains(.shift) {
             onSelect(.range)
         } else if event.modifierFlags.contains(.command) {

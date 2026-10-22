@@ -71,7 +71,6 @@ struct MaXplorerApp: App {
                 Button("Quick View") {
                     model.quickViewSelectedItem()
                 }
-                .keyboardShortcut(.space, modifiers: [])
                 .disabled(!model.canQuickViewSelectedItem)
 
                 Button("New Folder") {
