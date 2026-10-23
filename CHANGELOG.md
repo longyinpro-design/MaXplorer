@@ -1,5 +1,13 @@
 # Change Log
 
+## 2026-10-23 — v1.10
+
+- Localized the interface into Simplified Chinese, including menus, settings, Space Analyzer, Copy Queue, and preview windows.
+- Improved Quick View with Quick Look previews, explicit text encodings, legacy Office warnings, reliable password submission, and better window resizing and placement across displays.
+- Made copies and moves transactional: files are staged privately, verified, then published atomically while preserving permissions, ACLs, extended attributes, resource forks, and timestamps. Cancellation or failure keeps the original destination intact.
+- Significantly improved large-folder browsing: rows appear progressively, sorting and filtering run off the main actor, type descriptions are cached per extension, and icons and volume information load asynchronously.
+- Parallelized Space Analyzer scans with bounded concurrency and optimized treemap layout, including smoother window resizing for large scans.
+
 ## 2026-10-13 — v1.09
 
 - Added Finder tag color dots to file and folder icons.
