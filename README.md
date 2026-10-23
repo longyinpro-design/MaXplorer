@@ -79,6 +79,10 @@ Current macOS 26 enhancements:
 - The About and Settings canvases use Liquid Glass cards, with color themes that extend across the app window and supporting sheets.
 - The Air color theme uses higher-transparency materials across app surfaces.
 
+## Origin
+
+MaXplorer is a modified derivative of [MacXplorer](https://github.com/adisapir/MacXplorer) by Adi Sapir. The upstream project and its commit history are preserved. This repository focuses on large-folder browsing performance, transactional file transfers, Quick View, and Space Analyzer responsiveness.
+
 ## License
 
-MaXplorer is free software licensed under the [GNU General Public License version 3](LICENSE). You may redistribute and modify it under the terms of that license.
+MaXplorer is free software licensed under the [GNU General Public License version 3](LICENSE). You may redistribute and modify it under the terms of that license. Copyright in the original MacXplorer code remains with its authors.
