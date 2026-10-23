@@ -20,7 +20,7 @@ The manifest covers the three modified existing Swift files, `SafeFileOperations
 4. Publish with `renameatx_np`: `RENAME_EXCL` for a new name, `RENAME_SWAP` for a confirmed overwrite. An old destination stays in place until the staged copy is complete. Unsupported rename capabilities fail without a remove-and-retry fallback.
 5. Same-volume moves to a new name use exclusive rename. Overwrite moves and actual `EXDEV` moves use the staged copy path. After publication, source removal failures retain the complete destination and the remaining source and report the partial move. The complete destination is never deleted to undo failed source removal.
 6. Cancellation is honored before publication. After publication, finishing the committed operation takes precedence. A running queue item keeps its task and concurrency slot until the worker actually terminates; it cannot produce a false successful history entry after an acknowledged cancellation.
-7. Queue and service transfers share one mutation lane. Copies do not overlap their filesystem mutation phases, even when multiple queue items are scheduled. This intentionally prioritizes correctness over transfer throughput in this slice.
+7. Queue and service transfers share one publication lane. Payload copies run concurrently in private staging directories; only final validation, rename, and source removal are serialized. This keeps the correctness properties above while honoring the configured copy concurrency.
 
 ## Directory permissions and recovery
 

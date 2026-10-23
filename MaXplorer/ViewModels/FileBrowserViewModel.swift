@@ -37,14 +37,16 @@ final class FileBrowserViewModel: ObservableObject {
     @Published private(set) var currentURL: URL
     @Published private(set) var items: [FileItem] = [] {
         didSet {
-            resortItems()
+            scheduleDisplayUpdate()
         }
     }
-    /// `items` sorted and filtered for display. Kept as stored state and only
-    /// rebuilt when the items, sort, or filter change, because the table,
-    /// status bar, and selection logic all read it on every render.
+    /// `items` sorted and filtered for display. Kept as stored state and rebuilt
+    /// off the main actor only when the items, sort, or filter change, because
+    /// the table, status bar, and selection logic all read it on every render.
     @Published private(set) var displayedItems: [FileItem] = []
     @Published private(set) var isLoading = false
+    @Published private(set) var loadsTagColors = false
+    @Published private(set) var volumeStats: VolumeCapacityStats?
     @Published private(set) var errorMessage: String?
     @Published var isConnectToServerPresented = false
     @Published var isGoToFolderPresented = false
@@ -54,7 +56,7 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var filterText = "" {
         didSet {
             guard filterText != oldValue else { return }
-            refilterItems()
+            scheduleDisplayUpdate(debounceMilliseconds: 150)
         }
     }
     let filterFocusProxy = FilterFocusProxy()
@@ -62,7 +64,7 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var sortOrder = FileSortDescriptor.fallback.comparators {
         didSet {
             guard sortOrder != oldValue else { return }
-            resortItems()
+            scheduleDisplayUpdate()
             if !isRestoringSort, let sort = FileSortDescriptor(sortOrder) {
                 FolderSortStore.shared.remember(sort, for: currentURL)
             }
@@ -79,7 +81,7 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var showAliases = true {
         didSet {
             guard showAliases != oldValue else { return }
-            refilterItems()
+            scheduleDisplayUpdate()
         }
     }
     @Published var isIntegratedTerminalPresented = false
@@ -102,8 +104,22 @@ final class FileBrowserViewModel: ObservableObject {
     private var monitorReloadTask: Task<Void, Never>?
     private var clipboardObservation: AnyCancellable?
     private var favoritesObservation: AnyCancellable?
-    private var sortedItems: [FileItem] = []
     private var isRestoringSort = false
+    private var displayGeneration = 0
+    private var displayTask: Task<Void, Never>?
+    private var isAwaitingLoadDisplay = false
+    private var progressiveLoadItems: [FileItem] = []
+    private var lastProgressiveDisplayUptime: UInt64 = 0
+    private var pendingCompletedURLs: [URL] = []
+    private var pendingCompletedURLSet: Set<URL> = []
+    private var completionFlushTask: Task<Void, Never>?
+    private let volumeCatalog = VolumeCatalog.shared
+    private var volumeCatalogObservation: AnyCancellable?
+    private var volumeStatsRefreshTask: Task<Void, Never>?
+    private var volumeStatsLoadTask: Task<Void, Never>?
+    private static let completionFlushDelayMilliseconds = 400
+    private static let maximumIncrementalRefreshCount = 400
+    private static let progressiveDisplayIntervalNanoseconds: UInt64 = 200_000_000
 
     private struct ConflictSession {
         nonisolated enum Operation: Sendable {
@@ -138,11 +154,14 @@ final class FileBrowserViewModel: ObservableObject {
         self.pathText = homeURL.path
         self.sortOrder = FolderSortStore.shared.sort(for: homeURL).comparators
         self.copyQueue.observeItemCompletions { [weak self] destinationURL in
-            guard let self, destinationURL.deletingLastPathComponent().standardizedFileURL == self.currentURL.standardizedFileURL else {
-                return
-            }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      destinationURL.deletingLastPathComponent().standardizedFileURL == self.currentURL.standardizedFileURL else {
+                    return
+                }
 
-            Task { await self.refreshAfterCompletedItem(destinationURL) }
+                self.enqueueCompletedItem(destinationURL)
+            }
         }
         self.copyQueue.observeMoveCompletions { [weak self] sourceURL in
             self?.clearCutItems(containing: [sourceURL])
@@ -153,6 +172,10 @@ final class FileBrowserViewModel: ObservableObject {
         self.favoritesObservation = favoritesStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        self.volumeCatalogObservation = volumeCatalog.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        startVolumeStatsRefreshLoop()
 
         // Defer the initial load to the next main-actor tick. Calling reload()
         // directly here would publish @Published changes (isLoading/errorMessage)
@@ -167,6 +190,10 @@ final class FileBrowserViewModel: ObservableObject {
     deinit {
         monitorReloadTask?.cancel()
         folderMonitor?.cancel()
+        completionFlushTask?.cancel()
+        displayTask?.cancel()
+        volumeStatsRefreshTask?.cancel()
+        volumeStatsLoadTask?.cancel()
     }
 
     var cutItemURLs: [URL] {
@@ -185,19 +212,68 @@ final class FileBrowserViewModel: ObservableObject {
         favoritesStore.removedBuiltInURLs
     }
 
-    private func resortItems() {
-        sortedItems = FileSorter.sorted(items, by: FileSortDescriptor(sortOrder) ?? FolderSortStore.shared.defaultSort)
-        refilterItems()
+    /// Drops any sort/filter result computed for a folder that is no longer the
+    /// current loading target, so stale rows cannot briefly replace the spinner.
+    private func invalidatePendingDisplayUpdate() {
+        displayGeneration += 1
+        displayTask?.cancel()
+        displayTask = nil
+        isAwaitingLoadDisplay = false
     }
 
-    private func refilterItems() {
+    /// Rebuilds the displayed rows without blocking the main actor. Every input
+    /// change bumps `displayGeneration` so only the newest result is applied;
+    /// filter typing waits briefly so keystrokes are not each sorted and
+    /// filtered against the whole folder.
+    private func scheduleDisplayUpdate(debounceMilliseconds: Int = 0) {
+        displayGeneration += 1
+        let generation = displayGeneration
+        let itemsSnapshot = items
+        let descriptor = FileSortDescriptor(sortOrder) ?? FolderSortStore.shared.defaultSort
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let showAliases = showAliases
+
+        displayTask?.cancel()
+        displayTask = Task { [weak self] in
+            if debounceMilliseconds > 0 {
+                guard (try? await Task.sleep(for: .milliseconds(debounceMilliseconds))) != nil else {
+                    return
+                }
+            }
+
+            let displayed = await Task.detached(priority: .userInitiated) {
+                Self.displayedItems(
+                    from: itemsSnapshot,
+                    descriptor: descriptor,
+                    query: query,
+                    showAliases: showAliases
+                )
+            }.value
+
+            guard let self, generation == self.displayGeneration else {
+                return
+            }
+
+            self.displayedItems = displayed
+            if self.isAwaitingLoadDisplay {
+                self.isAwaitingLoadDisplay = false
+                self.isLoading = false
+            }
+        }
+    }
+
+    nonisolated private static func displayedItems(
+        from items: [FileItem],
+        descriptor: FileSortDescriptor,
+        query: String,
+        showAliases: Bool
+    ) -> [FileItem] {
+        let sorted = FileSorter.sorted(items, by: descriptor)
         guard !query.isEmpty || !showAliases else {
-            displayedItems = sortedItems
-            return
+            return sorted
         }
 
-        displayedItems = sortedItems.filter { item in
+        return sorted.filter { item in
             if !showAliases && item.isAlias {
                 return false
             }
@@ -254,11 +330,6 @@ final class FileBrowserViewModel: ObservableObject {
         return currentURL.isFileURL ? currentURL.path : currentURL.absoluteString
     }
 
-    /// Used/free/total bytes for the volume backing the current folder.
-    /// Nil while browsing the network root or when the volume can't be queried.
-    var volumeStats: VolumeCapacityStats? {
-        VolumeCapacityReader.stats(for: currentURL)
-    }
     var tabTitle: String {
         if currentURL == Self.networkRootURL {
             return "网络"
@@ -302,20 +373,13 @@ final class FileBrowserViewModel: ObservableObject {
             )
         )
 
-        let volumes = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: [.volumeIsLocalKey, .volumeNameKey],
-            options: [.skipHiddenVolumes]
-        ) ?? []
-
-        for volume in volumes where volume.path != "/" {
-            let values = try? volume.resourceValues(forKeys: [.volumeIsLocalKey, .volumeNameKey])
-            let isLocal = values?.volumeIsLocal ?? true
+        for volume in volumeCatalog.mountedVolumes where volume.url.path != "/" {
             locations.append(
                 SidebarLocation(
-                    name: values?.volumeName ?? volume.lastPathComponent,
-                    url: volume,
-                    group: isLocal ? .devices : .network,
-                    systemImage: isLocal ? "externaldrive.fill" : "server.rack"
+                    name: volume.name,
+                    url: volume.url,
+                    group: volume.isLocal ? .devices : .network,
+                    systemImage: volume.isLocal ? "externaldrive.fill" : "server.rack"
                 )
             )
         }
@@ -333,6 +397,7 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func reload() {
+        invalidatePendingDisplayUpdate()
         Task { await self.reload(selecting: nil) }
     }
 
@@ -352,15 +417,20 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func reload(selecting itemID: FileItem.ID?) async {
+        invalidatePendingDisplayUpdate()
         let target = currentURL
         let showHiddenFiles = showHiddenFiles
         let fileSystem = fileSystem
         let listingOptions = listingOptions
         let isRemoteVolume = target != Self.networkRootURL && isOnRemoteMountedVolume(target)
+        loadsTagColors = target.isFileURL && !isRemoteVolume
         loadGeneration += 1
         let generation = loadGeneration
+        progressiveLoadItems.removeAll(keepingCapacity: true)
+        lastProgressiveDisplayUptime = 0
         isLoading = true
         errorMessage = nil
+        refreshVolumeStats()
         Task {
             do {
                 let loadedItems: [FileItem]
@@ -371,7 +441,10 @@ final class FileBrowserViewModel: ObservableObject {
                     loadedItems = try await fileSystem.listDirectory(
                         at: target,
                         showHiddenFiles: showHiddenFiles,
-                        options: initialOptions
+                        options: initialOptions,
+                        onPartial: { batch in
+                            await self.receiveProgressiveBatch(batch, generation: generation)
+                        }
                     )
                 }
 
@@ -379,18 +452,67 @@ final class FileBrowserViewModel: ObservableObject {
                     return
                 }
 
+                progressiveLoadItems.removeAll(keepingCapacity: false)
+                isAwaitingLoadDisplay = true
                 applyLoadedItems(loadedItems, selecting: itemID)
-                isLoading = false
             } catch {
                 guard generation == loadGeneration else {
                     return
                 }
 
+                progressiveLoadItems.removeAll(keepingCapacity: false)
                 items = []
+                isAwaitingLoadDisplay = false
+                displayedItems = []
                 selectedItemIDs = []
                 selectionAnchorID = nil
                 isLoading = false
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Applies an intermediate listing batch without waiting for enumeration to
+    /// finish. Updates are throttled because each one re-sorts the accumulated
+    /// rows off the main actor.
+    private func receiveProgressiveBatch(_ batch: [FileItem], generation: Int) {
+        guard generation == loadGeneration else { return }
+        progressiveLoadItems.append(contentsOf: batch)
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastProgressiveDisplayUptime != 0,
+           now - lastProgressiveDisplayUptime < Self.progressiveDisplayIntervalNanoseconds {
+            return
+        }
+
+        lastProgressiveDisplayUptime = now
+        items = progressiveLoadItems
+    }
+
+    /// Queries capacity off the main actor so SMB or busy disks cannot stall a
+    /// render. Stale results for a previous folder are discarded.
+    private func refreshVolumeStats() {
+        let target = currentURL
+        volumeStatsLoadTask?.cancel()
+        volumeStatsLoadTask = Task { [weak self] in
+            let stats = await Task.detached(priority: .utility) {
+                VolumeCapacityReader.stats(for: target)
+            }.value
+            guard !Task.isCancelled, let self, self.currentURL == target else { return }
+            self.volumeStats = stats
+        }
+    }
+
+    private func startVolumeStatsRefreshLoop() {
+        volumeStatsRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    guard let self else { return }
+                    self.refreshVolumeStats()
+                }
+                guard (try? await Task.sleep(for: .seconds(15))) != nil else {
+                    return
+                }
             }
         }
     }
@@ -449,9 +571,13 @@ final class FileBrowserViewModel: ObservableObject {
         source.setEventHandler { [weak self, weak source] in
             guard let self, self.currentURL.standardizedFileURL == monitoredURL else { return }
             let event = source?.data ?? []
+            // While a transfer writes into this folder, its completion batches
+            // keep the rows current. Wait for the folder to go quiet before
+            // paying for a full enumeration again.
+            let debounceMilliseconds = self.hasActiveTransfer(into: self.currentURL) ? 1200 : 300
             self.monitorReloadTask?.cancel()
             self.monitorReloadTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(300))
+                try? await Task.sleep(for: .milliseconds(debounceMilliseconds))
                 guard !Task.isCancelled, let self else { return }
                 if event.contains(.delete) || event.contains(.rename) {
                     self.startMonitoringCurrentFolder()
@@ -472,6 +598,14 @@ final class FileBrowserViewModel: ObservableObject {
         monitorReloadTask = nil
         folderMonitor?.cancel()
         folderMonitor = nil
+    }
+
+    private func hasActiveTransfer(into directory: URL) -> Bool {
+        let target = directory.standardizedFileURL
+        return copyQueue.items.contains { item in
+            item.state.isActive
+                && item.destinationURL.deletingLastPathComponent().standardizedFileURL == target
+        }
     }
 
     func goBack() {
@@ -1091,11 +1225,10 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func mountedRemoteVolumeItems() -> [FileItem] {
-        remoteMountedVolumes().map { volume in
-            let values = try? volume.resourceValues(forKeys: [.contentModificationDateKey, .volumeNameKey])
-            return FileItem(
-                url: volume,
-                name: values?.volumeName ?? volume.lastPathComponent,
+        volumeCatalog.mountedVolumes.filter { !$0.isLocal }.map { volume in
+            FileItem(
+                url: volume.url,
+                name: volume.name,
                 typeDescription: "已挂载的网络卷",
                 isDirectory: true,
                 isPackage: false,
@@ -1105,28 +1238,16 @@ final class FileBrowserViewModel: ObservableObject {
                 isAliasTargetPackage: false,
                 isHidden: false,
                 size: nil,
-                modifiedAt: values?.contentModificationDate
+                modifiedAt: volume.modifiedAt
             )
         }
     }
 
-    private func remoteMountedVolumes() -> [URL] {
-        let volumes = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: [.volumeIsLocalKey, .volumeNameKey],
-            options: [.skipHiddenVolumes]
-        ) ?? []
-
-        return volumes.filter { volume in
-            guard volume.path != "/" else {
-                return false
-            }
-
-            let values = try? volume.resourceValues(forKeys: [.volumeIsLocalKey])
-            return values?.volumeIsLocal == false
-        }
-    }
-
     private func isOnRemoteMountedVolume(_ url: URL) -> Bool {
+        if let isLocal = volumeCatalog.isLocalVolume(containing: url) {
+            return !isLocal
+        }
+
         let values = try? url.resourceValues(forKeys: [.volumeURLKey, .volumeIsLocalKey])
         if let isLocal = values?.volumeIsLocal {
             return !isLocal
@@ -1141,45 +1262,137 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func applyLoadedItems(_ loadedItems: [FileItem], selecting itemID: FileItem.ID?) {
+        let loadedIDs = Set(loadedItems.map(\.id))
         items = loadedItems
-        if let itemID, loadedItems.contains(where: { $0.id == itemID }) {
+        if let itemID, loadedIDs.contains(itemID) {
             selectedItemIDs = [itemID]
             selectionAnchorID = itemID
         } else {
-            selectedItemIDs = selectedItemIDs.filter { selectedID in
-                loadedItems.contains { $0.id == selectedID }
-            }
+            selectedItemIDs = selectedItemIDs.filter { loadedIDs.contains($0) }
             if let selectionAnchorID, !selectedItemIDs.contains(selectionAnchorID) {
                 self.selectionAnchorID = selectedItemIDs.first
             }
         }
     }
 
-    private func refreshAfterCompletedItem(_ destinationURL: URL) async {
-        let destinationDirectory = destinationURL.deletingLastPathComponent().standardizedFileURL
-        guard destinationDirectory == currentURL.standardizedFileURL else {
+    /// Completed transfers arrive one file at a time. Collect them briefly so a
+    /// batch of small files updates the table once instead of re-enumerating and
+    /// re-sorting the whole folder for every file.
+    private func enqueueCompletedItem(_ destinationURL: URL) {
+        let standardizedURL = destinationURL.standardizedFileURL
+        guard pendingCompletedURLSet.insert(standardizedURL).inserted else {
             return
         }
 
-        guard isOnRemoteMountedVolume(destinationDirectory) else {
-            await reload(selecting: destinationURL)
+        pendingCompletedURLs.append(standardizedURL)
+        scheduleCompletionFlush()
+    }
+
+    private func scheduleCompletionFlush() {
+        guard completionFlushTask == nil else {
+            return
+        }
+
+        completionFlushTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(Self.completionFlushDelayMilliseconds))
+            } catch {
+                self?.completionFlushTask = nil
+                return
+            }
+
+            guard let self, !Task.isCancelled else { return }
+            self.completionFlushTask = nil
+            await self.flushCompletedItems()
+        }
+    }
+
+    private func flushCompletedItems() async {
+        guard !pendingCompletedURLs.isEmpty else {
+            return
+        }
+
+        let completedURLs = pendingCompletedURLs
+        pendingCompletedURLs.removeAll()
+        pendingCompletedURLSet.removeAll()
+
+        let target = currentURL
+        let targetDirectory = target.standardizedFileURL
+        guard target.isFileURL,
+              completedURLs.allSatisfy({
+                  $0.deletingLastPathComponent().standardizedFileURL == targetDirectory
+              }) else {
+            return
+        }
+
+        let generation = loadGeneration
+        let options = isOnRemoteMountedVolume(target) ? DirectoryListingOptions() : listingOptions
+
+        guard completedURLs.count <= Self.maximumIncrementalRefreshCount else {
+            await reload(selecting: completedURLs.last)
             return
         }
 
         do {
-            // Keep completion feedback responsive on SMB. Optional Owner and
-            // Date Taken lookups can each require additional remote round trips.
-            let item = try await fileSystem.fileItem(at: destinationURL, options: DirectoryListingOptions())
-            guard destinationDirectory == currentURL.standardizedFileURL else {
+            let fetched = try await fileItems(for: completedURLs, options: options)
+            guard currentURL.standardizedFileURL == targetDirectory else {
+                return
+            }
+            guard generation == loadGeneration else {
+                // A full reload is already in flight. Let it finish, then apply
+                // these completions against the newer listing.
+                for url in completedURLs where pendingCompletedURLSet.insert(url).inserted {
+                    pendingCompletedURLs.append(url)
+                }
+                scheduleCompletionFlush()
+                return
+            }
+            guard !fetched.isEmpty else {
                 return
             }
 
-            items.removeAll { $0.id == item.id }
-            items.append(item)
-            selectedItemIDs = [item.id]
-            selectionAnchorID = item.id
+            let fetchedIDs = Set(fetched.map(\.id))
+            var merged = items
+            merged.removeAll { fetchedIDs.contains($0.id) }
+            merged.append(contentsOf: fetched)
+            items = merged
+
+            if let lastURL = completedURLs.last,
+               let lastItem = fetched.first(where: { $0.url.standardizedFileURL == lastURL }) {
+                selectedItemIDs = [lastItem.id]
+                selectionAnchorID = lastItem.id
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            guard currentURL.standardizedFileURL == targetDirectory else {
+                return
+            }
+            await reload(selecting: nil)
+        }
+    }
+
+    private func fileItems(for urls: [URL], options: DirectoryListingOptions) async throws -> [FileItem] {
+        let fileSystem = self.fileSystem
+        return try await withThrowingTaskGroup(of: FileItem.self) { group in
+            let maximumConcurrency = 6
+            var nextIndex = 0
+            let primeCount = min(maximumConcurrency, urls.count)
+            while nextIndex < primeCount {
+                let url = urls[nextIndex]
+                group.addTask { try await fileSystem.fileItem(at: url, options: options) }
+                nextIndex += 1
+            }
+
+            var fetched: [FileItem] = []
+            fetched.reserveCapacity(urls.count)
+            while let item = try await group.next() {
+                fetched.append(item)
+                if nextIndex < urls.count {
+                    let url = urls[nextIndex]
+                    group.addTask { try await fileSystem.fileItem(at: url, options: options) }
+                    nextIndex += 1
+                }
+            }
+            return fetched
         }
     }
 

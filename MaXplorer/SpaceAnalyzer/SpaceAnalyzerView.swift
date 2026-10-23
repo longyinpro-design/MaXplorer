@@ -1,139 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: – Treemap Layout
-
-enum TreemapLayout {
-    /// Recursively computes `layoutFrame` for every node in the tree.
-    static func layout(node: SpaceNode, in rect: CGRect) {
-        node.layoutFrame = rect
-        guard node.isDirectory, !node.children.isEmpty, node.size > 0,
-              rect.width > 2, rect.height > 2 else { return }
-        squarify(
-            nodes: node.children,
-            total: Double(node.size),
-            in: rect.insetBy(dx: 1, dy: 1),
-            weight: { Double($0.size) }
-        )
-    }
-
-    /// Lays out one folder level as a WinDirStat-style mosaic. Square-root
-    /// weighting keeps relative size ordering while leaving small items usable.
-    static func layoutDrillDown(nodes: [SpaceNode], in rect: CGRect) {
-        let weight: (SpaceNode) -> Double = { sqrt(Double(max(1, $0.size))) }
-        let total = nodes.reduce(0.0) { $0 + weight($1) }
-        squarify(nodes: nodes, total: total, in: rect.insetBy(dx: 4, dy: 4), weight: weight)
-    }
-
-    private static func squarify(
-        nodes: [SpaceNode],
-        total: Double,
-        in available: CGRect,
-        weight: (SpaceNode) -> Double
-    ) {
-        guard !nodes.isEmpty, total > 0, available.width > 0, available.height > 0 else { return }
-        var remaining = nodes
-        var current = available
-        var remainingTotal = total
-
-        while !remaining.isEmpty && remainingTotal > 0 && current.width > 0 && current.height > 0 {
-            var row: [SpaceNode] = []
-            var rowTotal = 0.0
-            var prevWorst = Double.infinity
-
-            for (i, node) in remaining.enumerated() {
-                row.append(node)
-                rowTotal += weight(node)
-                let worst = worstRatio(
-                    row: row,
-                    rowTotal: rowTotal,
-                    total: remainingTotal,
-                    in: current,
-                    weight: weight
-                )
-                if i > 0 && worst > prevWorst {
-                    row.removeLast()
-                    rowTotal -= weight(node)
-                    break
-                }
-                prevWorst = worst
-            }
-
-            let count = row.count
-            placeRow(row: row, rowTotal: rowTotal, remaining: remainingTotal, in: current, weight: weight)
-            for n in row where n.isDirectory && !n.children.isEmpty {
-                squarify(
-                    nodes: n.children,
-                    total: Double(n.size),
-                    in: n.layoutFrame.insetBy(dx: 1, dy: 1),
-                    weight: { Double($0.size) }
-                )
-            }
-
-            let frac = CGFloat(rowTotal / remainingTotal)
-            if current.width >= current.height {
-                let w = current.width * frac
-                current = CGRect(x: current.minX + w, y: current.minY, width: current.width - w, height: current.height)
-            } else {
-                let h = current.height * frac
-                current = CGRect(x: current.minX, y: current.minY + h, width: current.width, height: current.height - h)
-            }
-            remainingTotal -= rowTotal
-            remaining = Array(remaining.dropFirst(count))
-        }
-    }
-
-    private static func worstRatio(
-        row: [SpaceNode],
-        rowTotal: Double,
-        total: Double,
-        in rect: CGRect,
-        weight: (SpaceNode) -> Double
-    ) -> Double {
-        let isWide = rect.width >= rect.height
-        let frac = rowTotal / total
-        let stripLong = (isWide ? Double(rect.width) : Double(rect.height)) * frac
-        let stripShort = isWide ? Double(rect.height) : Double(rect.width)
-        var worst = 0.0
-        for n in row {
-            let tileFrac = weight(n) / rowTotal
-            let a = stripLong
-            let b = stripShort * tileFrac
-            guard a > 0, b > 0 else { continue }
-            worst = max(worst, max(a / b, b / a))
-        }
-        return worst
-    }
-
-    private static func placeRow(
-        row: [SpaceNode],
-        rowTotal: Double,
-        remaining: Double,
-        in rect: CGRect,
-        weight: (SpaceNode) -> Double
-    ) {
-        let isWide = rect.width >= rect.height
-        let frac = CGFloat(rowTotal / remaining)
-        if isWide {
-            let stripWidth = rect.width * frac
-            var y = rect.minY
-            for n in row {
-                let h = rect.height * CGFloat(weight(n) / rowTotal)
-                n.layoutFrame = CGRect(x: rect.minX, y: y, width: stripWidth, height: h)
-                y += h
-            }
-        } else {
-            let stripHeight = rect.height * frac
-            var x = rect.minX
-            for n in row {
-                let w = rect.width * CGFloat(weight(n) / rowTotal)
-                n.layoutFrame = CGRect(x: x, y: rect.minY, width: w, height: stripHeight)
-                x += w
-            }
-        }
-    }
-}
-
 // MARK: – Colorful icon used for the tab + toolbar
 
 struct SpaceAnalyzerIcon: View {
@@ -341,8 +208,10 @@ private struct TreemapCanvas: View {
 
     @State private var tileList: [(node: SpaceNode, frame: CGRect)] = []
     @State private var canvasSize: CGSize = .zero
+    @State private var pendingResizeTask: Task<Void, Never>?
 
     private let minTileArea: CGFloat = 36  // 6×6 px minimum
+    private let largeLayoutTileThreshold = 2_000
 
     var body: some View {
         GeometryReader { geo in
@@ -364,11 +233,40 @@ private struct TreemapCanvas: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .onChange(of: geo.size) { _, size in rebuildLayout(size: size) }
+            .clipped()
+            .onChange(of: geo.size) { _, size in scheduleRebuild(size: size) }
             .onAppear { rebuildLayout(size: geo.size) }
         }
-        .onChange(of: root.id) { _, _ in rebuildLayout(size: canvasSize) }
-        .onChange(of: mode) { _, _ in rebuildLayout(size: canvasSize) }
+        .onChange(of: root.id) { _, _ in rebuildNow() }
+        .onChange(of: mode) { _, _ in rebuildNow() }
+        .onDisappear { pendingResizeTask?.cancel() }
+    }
+
+    /// Small layouts follow a live resize directly. Large layouts wait until
+    /// the drag pauses so a 20k-node tree cannot block the main actor on every
+    /// intermediate window size.
+    private func scheduleRebuild(size: CGSize) {
+        canvasSize = size
+        guard size.width > 0, size.height > 0 else { return }
+
+        if tileList.count <= largeLayoutTileThreshold {
+            pendingResizeTask?.cancel()
+            rebuildLayout(size: size)
+            return
+        }
+
+        pendingResizeTask?.cancel()
+        pendingResizeTask = Task {
+            guard (try? await Task.sleep(for: .milliseconds(120))) != nil else {
+                return
+            }
+            rebuildLayout(size: size)
+        }
+    }
+
+    private func rebuildNow() {
+        pendingResizeTask?.cancel()
+        rebuildLayout(size: canvasSize)
     }
 
     private func rebuildLayout(size: CGSize) {
@@ -379,20 +277,28 @@ private struct TreemapCanvas: View {
             TreemapLayout.layoutDrillDown(nodes: root.children, in: bounds)
             tileList = root.children.map { ($0, $0.layoutFrame) }
         } else {
-            TreemapLayout.layout(node: root, in: bounds)
-            tileList = collectLeaves(node: root)
+            TreemapLayout.layout(node: root, in: bounds, minimumArea: minTileArea)
+            var leaves: [(node: SpaceNode, frame: CGRect)] = []
+            collectLeaves(node: root, into: &leaves)
+            tileList = leaves
         }
     }
 
-    private func collectLeaves(node: SpaceNode) -> [(SpaceNode, CGRect)] {
+    private func collectLeaves(node: SpaceNode, into result: inout [(node: SpaceNode, frame: CGRect)]) {
         let area = node.layoutFrame.width * node.layoutFrame.height
-        guard area >= minTileArea else { return [] }
+        guard area >= minTileArea else { return }
 
         if node.isDirectory && !node.children.isEmpty {
-            let childLeaves = node.children.flatMap { collectLeaves(node: $0) }
-            if !childLeaves.isEmpty { return childLeaves }
+            let countBefore = result.count
+            for child in node.children {
+                collectLeaves(node: child, into: &result)
+            }
+            if result.count > countBefore {
+                return
+            }
         }
-        return [(node, node.layoutFrame)]
+
+        result.append((node, node.layoutFrame))
     }
 }
 

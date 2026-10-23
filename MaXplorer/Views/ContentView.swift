@@ -749,6 +749,7 @@ private struct SidebarView: View {
     private let spaceAnalyzerSelectionID = "maxplorer://space-analyzer"
 
     var body: some View {
+        let locations = model.sidebarLocations
         VStack(spacing: 0) {
             List(selection: Binding<String?>(
             get: {
@@ -782,7 +783,7 @@ private struct SidebarView: View {
             }
         )) {
             Section(isExpanded: $favoritesExpanded) {
-                ForEach(model.sidebarLocations.filter { $0.group == .favorites }) { location in
+                ForEach(locations.filter { $0.group == .favorites }) { location in
                     Label(location.name, systemImage: location.systemImage)
                         .sidebarHover()
                         .tag(location.url.absoluteString)
@@ -811,9 +812,9 @@ private struct SidebarView: View {
                 _ = model.pinDroppedFavorites(urls)
             }
 
-            if model.sidebarLocations.contains(where: { $0.group == .devices }) {
+            if locations.contains(where: { $0.group == .devices }) {
                 Section(SidebarLocation.Group.devices.displayName) {
-                    ForEach(model.sidebarLocations.filter { $0.group == .devices }) { location in
+                    ForEach(locations.filter { $0.group == .devices }) { location in
                         Label(location.name, systemImage: location.systemImage)
                             .sidebarHover()
                             .tag(location.url.absoluteString)
@@ -853,7 +854,7 @@ private struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
 
-                ForEach(model.sidebarLocations.filter { $0.group == .network }) { location in
+                ForEach(locations.filter { $0.group == .network }) { location in
                     Label(location.name, systemImage: location.systemImage)
                         .sidebarHover()
                         .tag(location.url.absoluteString)
@@ -1921,7 +1922,7 @@ private struct FileTableView: View {
                 model.openSelected()
             }
 
-            if model.isLoading {
+            if model.isLoading && model.displayedItems.isEmpty {
                 ProgressView()
                     .controlSize(.large)
                     .padding(22)
@@ -2055,7 +2056,11 @@ private struct FileTableView: View {
     private func nameCell(for item: FileItem) -> some View {
         let isFolderTarget = folderDropTargetID == item.id
         HStack(spacing: 8) {
-            FileItemIcon(item: item, folderIconStyle: settings.folderIconStyle)
+            FileItemIcon(
+                item: item,
+                folderIconStyle: settings.folderIconStyle,
+                allowsTagLoading: model.loadsTagColors
+            )
             Text(item.name).lineLimit(1)
             Spacer(minLength: 0)
         }
@@ -2235,9 +2240,25 @@ private final class TableCellClickTargetNSView: NSView {
 private struct FileItemIcon: View {
     let item: FileItem
     let folderIconStyle: FolderIconStyle
+    let allowsTagLoading: Bool
+    @State private var tagColors: [FinderTagColor]
+    @State private var icon: NSImage?
+
+    init(item: FileItem, folderIconStyle: FolderIconStyle, allowsTagLoading: Bool) {
+        self.item = item
+        self.folderIconStyle = folderIconStyle
+        self.allowsTagLoading = allowsTagLoading
+        _tagColors = State(initialValue: item.tagColors)
+        _icon = State(initialValue: FileIconCache.cachedIcon(for: item))
+    }
 
     private var isPlainFolder: Bool {
         item.isDirectory && !item.isPackage
+    }
+
+    private var iconRequestID: String {
+        let modified = item.modifiedAt?.timeIntervalSinceReferenceDate ?? 0
+        return "\(item.url.path)|\(modified)|\(folderIconStyle.rawValue)"
     }
 
     var body: some View {
@@ -2252,19 +2273,56 @@ private struct FileItemIcon: View {
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.yellow)
                     .font(.system(size: 17, weight: .medium))
+            } else if isPlainFolder && !tagColors.isEmpty {
+                Image(nsImage: FileIconCache.plainFolderIcon)
+                    .resizable()
+                    .interpolation(.high)
             } else {
-                Image(nsImage: FileIconCache.icon(for: item, untinted: isPlainFolder && !item.tagColors.isEmpty))
+                Image(nsImage: icon ?? (item.isDirectory ? FileIconCache.plainFolderIcon : FileIconCache.placeholderIcon))
                     .resizable()
                     .interpolation(.high)
             }
         }
         .frame(width: 20, height: 20)
         .overlay(alignment: isPlainFolder ? .center : .bottomTrailing) {
-            if !item.tagColors.isEmpty {
-                FinderTagDots(colors: item.tagColors)
+            if !tagColors.isEmpty {
+                FinderTagDots(colors: tagColors)
                     // Sit inside the folder's body, just below the tab.
                     .offset(x: isPlainFolder ? 0 : 2, y: 2)
             }
+        }
+        .task(id: item.id) {
+            guard allowsTagLoading, tagColors.isEmpty else {
+                return
+            }
+
+            let colors = await FinderTagLoader.colors(for: item.url)
+            guard !Task.isCancelled else {
+                return
+            }
+            tagColors = colors
+        }
+        .task(id: iconRequestID) {
+            guard !(item.isDirectory && folderIconStyle == .xplorer),
+                  !(isPlainFolder && !tagColors.isEmpty) else {
+                return
+            }
+
+            if let cached = FileIconCache.cachedIcon(for: item) {
+                icon = cached
+                return
+            }
+
+            icon = nil
+            let loaded = await FileIconCache.loadIcon(for: item)
+            guard !Task.isCancelled else {
+                return
+            }
+            icon = loaded
+        }
+        .onChange(of: item.id) { _, _ in
+            tagColors = item.tagColors
+            icon = FileIconCache.cachedIcon(for: item)
         }
     }
 }
@@ -2290,34 +2348,59 @@ private struct FinderTagDots: View {
 
 /// NSWorkspace returns the exact same icon Finder shows: correct type-specific
 /// icons for documents, apps, aliases (with arrow badge), packages, and all
-/// folder variants. Looking it up is not free, so rows reuse cached images
-/// instead of asking again every time the table re-renders or re-sorts.
+/// folder variants. Cache hits are synchronous; misses load off the main actor
+/// so a network or launch-services lookup cannot stall row rendering.
+@MainActor
 private enum FileIconCache {
-    private static let cache: NSCache<NSString, NSImage> = {
+    static let plainFolderIcon = NSWorkspace.shared.icon(for: .folder)
+    static let placeholderIcon = NSWorkspace.shared.icon(for: .data)
+
+    static func cachedIcon(for item: FileItem) -> NSImage? {
+        FileIconStore.shared.icons.object(forKey: key(for: item))
+    }
+
+    static func loadIcon(for item: FileItem) async -> NSImage? {
+        let cachedKey = key(for: item)
+        if let cached = FileIconStore.shared.icons.object(forKey: cachedKey) {
+            return cached
+        }
+
+        let path = item.url.path
+        let modified = item.modifiedAt?.timeIntervalSinceReferenceDate ?? 0
+        let box = await Task.detached(priority: .utility) {
+            let key = iconKey(path: path, modified: modified)
+            let icon = NSWorkspace.shared.icon(forFile: path)
+            FileIconStore.shared.icons.setObject(icon, forKey: key)
+            return FileIconBox(icon)
+        }.value
+        return box.icon
+    }
+
+    private static func key(for item: FileItem) -> NSString {
+        let modified = item.modifiedAt?.timeIntervalSinceReferenceDate ?? 0
+        return iconKey(path: item.url.path, modified: modified)
+    }
+
+    private nonisolated static func iconKey(path: String, modified: TimeInterval) -> NSString {
+        "\(path)|\(modified)" as NSString
+    }
+}
+
+private nonisolated final class FileIconStore: @unchecked Sendable {
+    static let shared = FileIconStore()
+
+    let icons: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
         cache.countLimit = 4000
         return cache
     }()
+}
 
-    private static let plainFolderIcon = NSWorkspace.shared.icon(for: .folder)
+private nonisolated final class FileIconBox: @unchecked Sendable {
+    let icon: NSImage
 
-    /// `untinted` swaps in the generic folder icon, because Finder tints the
-    /// icon of a tagged folder with its tag color and the tag is shown as a dot
-    /// instead.
-    static func icon(for item: FileItem, untinted: Bool) -> NSImage {
-        if untinted {
-            return plainFolderIcon
-        }
-
-        let modified = item.modifiedAt?.timeIntervalSinceReferenceDate ?? 0
-        let key = "\(item.url.path)|\(modified)" as NSString
-        if let icon = cache.object(forKey: key) {
-            return icon
-        }
-
-        let icon = NSWorkspace.shared.icon(forFile: item.url.path)
-        cache.setObject(icon, forKey: key)
-        return icon
+    init(_ icon: NSImage) {
+        self.icon = icon
     }
 }
 

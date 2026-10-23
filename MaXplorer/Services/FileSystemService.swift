@@ -56,7 +56,15 @@ struct DirectoryListingOptions: Equatable, Sendable {
     }
 }
 protocol FileSystemService: Sendable {
-    func listDirectory(at url: URL, showHiddenFiles: Bool, options: DirectoryListingOptions) async throws -> [FileItem]
+    /// Enumerates a directory. `onPartial` receives newly built batches while
+    /// metadata for large folders is still being collected, so the browser can
+    /// show rows before the full listing completes.
+    func listDirectory(
+        at url: URL,
+        showHiddenFiles: Bool,
+        options: DirectoryListingOptions,
+        onPartial: (@Sendable ([FileItem]) async -> Void)?
+    ) async throws -> [FileItem]
     func fileItem(at url: URL, options: DirectoryListingOptions) async throws -> FileItem
     func createFolder(named name: String, in directory: URL) async throws -> URL
     func renameItem(at url: URL, to newName: String) async throws -> URL
@@ -67,9 +75,23 @@ protocol FileSystemService: Sendable {
 }
 
 extension FileSystemService {
+    func listDirectory(at url: URL, showHiddenFiles: Bool, options: DirectoryListingOptions) async throws -> [FileItem] {
+        try await listDirectory(at: url, showHiddenFiles: showHiddenFiles, options: options, onPartial: nil)
+    }
+
     func moveItems(_ urls: [URL], to directory: URL) async throws -> [URL] {
         try await moveItems(urls.map { ($0, false) }, to: directory)
     }
+}
+
+private nonisolated final class FileTypeDescriptionStore: @unchecked Sendable {
+    static let shared = FileTypeDescriptionStore()
+
+    let descriptions: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 512
+        return cache
+    }()
 }
 
 struct LocalFileSystemService: FileSystemService {
@@ -80,16 +102,22 @@ struct LocalFileSystemService: FileSystemService {
         .isAliasFileKey,
         .isDirectoryKey,
         .isHiddenKey,
-        .isPackageKey,
-        .localizedTypeDescriptionKey
+        .isPackageKey
     ]
 
-    func listDirectory(at url: URL, showHiddenFiles: Bool, options: DirectoryListingOptions) async throws -> [FileItem] {
-        try await Task.detached(priority: .userInitiated) {
+    func listDirectory(
+        at url: URL,
+        showHiddenFiles: Bool,
+        options: DirectoryListingOptions,
+        onPartial: (@Sendable ([FileItem]) async -> Void)?
+    ) async throws -> [FileItem] {
+        let resourceKeys = keys
+        let keySet = Set(resourceKeys)
+        return try await Task.detached(priority: .userInitiated) {
             let enumerationOptions: FileManager.DirectoryEnumerationOptions = showHiddenFiles ? [] : [.skipsHiddenFiles]
             let urls = try FileManager.default.contentsOfDirectory(
                 at: url,
-                includingPropertiesForKeys: keys,
+                includingPropertiesForKeys: resourceKeys,
                 options: enumerationOptions
             )
 
@@ -97,25 +125,41 @@ struct LocalFileSystemService: FileSystemService {
             // construction is nonisolated, so no per-file hop to the main actor,
             // and at most `maxConcurrency` file-metadata reads run at once to
             // avoid thread explosion on large folders.
-            let resourceKeys = keys
             let maxConcurrency = 6
+            let batchSize = 512
+            let batchInterval: UInt64 = 120_000_000
             var items: [FileItem] = []
+            var batch: [FileItem] = []
             items.reserveCapacity(urls.count)
+            if onPartial != nil {
+                batch.reserveCapacity(batchSize)
+            }
+            var batchStart = DispatchTime.now().uptimeNanoseconds
 
             try await withThrowingTaskGroup(of: FileItem.self) { group in
                 var nextIndex = 0
                 let primeCount = min(maxConcurrency, urls.count)
                 while nextIndex < primeCount {
                     let itemURL = urls[nextIndex]
-                    group.addTask { try Self.makeFileItem(for: itemURL, resourceKeys: resourceKeys, options: options) }
+                    group.addTask { try Self.makeFileItem(for: itemURL, resourceKeys: keySet, options: options) }
                     nextIndex += 1
                 }
 
                 while let item = try await group.next() {
                     items.append(item)
+                    if onPartial != nil {
+                        batch.append(item)
+                        let now = DispatchTime.now().uptimeNanoseconds
+                        if batch.count >= batchSize
+                            || (batch.count >= 32 && now - batchStart >= batchInterval) {
+                            await onPartial?(batch)
+                            batch.removeAll(keepingCapacity: true)
+                            batchStart = DispatchTime.now().uptimeNanoseconds
+                        }
+                    }
                     if nextIndex < urls.count {
                         let itemURL = urls[nextIndex]
-                        group.addTask { try Self.makeFileItem(for: itemURL, resourceKeys: resourceKeys, options: options) }
+                        group.addTask { try Self.makeFileItem(for: itemURL, resourceKeys: keySet, options: options) }
                         nextIndex += 1
                     }
                 }
@@ -128,7 +172,7 @@ struct LocalFileSystemService: FileSystemService {
     }
 
     func fileItem(at url: URL, options: DirectoryListingOptions) async throws -> FileItem {
-        let resourceKeys = keys
+        let resourceKeys = Set(keys)
         return try await Task.detached(priority: .userInitiated) {
             try Self.makeFileItem(for: url, resourceKeys: resourceKeys, options: options)
         }.value
@@ -218,9 +262,10 @@ struct LocalFileSystemService: FileSystemService {
     }
 
     /// Fully off-main builder for a single directory entry.
-    nonisolated private static func makeFileItem(for itemURL: URL, resourceKeys: [URLResourceKey], options: DirectoryListingOptions) throws -> FileItem {
-        let values = try itemURL.resourceValues(forKeys: Set(resourceKeys))
+    nonisolated private static func makeFileItem(for itemURL: URL, resourceKeys: Set<URLResourceKey>, options: DirectoryListingOptions) throws -> FileItem {
+        let values = try itemURL.resourceValues(forKeys: resourceKeys)
         let isDirectory = values.isDirectory ?? false
+        let isPackage = values.isPackage ?? false
 
         var aliasTargetURL: URL?
         if values.isAliasFile == true {
@@ -239,9 +284,9 @@ struct LocalFileSystemService: FileSystemService {
         return FileItem(
             url: itemURL,
             name: itemURL.lastPathComponent,
-            typeDescription: values.localizedTypeDescription ?? "",
+            typeDescription: Self.typeDescription(for: itemURL, isDirectory: isDirectory, isPackage: isPackage),
             isDirectory: isDirectory,
-            isPackage: values.isPackage ?? false,
+            isPackage: isPackage,
             isAlias: values.isAliasFile ?? false,
             aliasTargetURL: aliasTargetURL,
             isAliasTargetDirectory: aliasTargetValues?.isDirectory ?? false,
@@ -254,6 +299,26 @@ struct LocalFileSystemService: FileSystemService {
             owner: owner,
             tagColors: tagColors
         )
+    }
+
+    /// `localizedTypeDescription` is a LaunchServices lookup per URL. Bulk
+    /// prefetching it makes a 20k-file directory wait hundreds of milliseconds
+    /// before the first row can render, and the description is determined by
+    /// the extension for almost every file. Resolve it once per extension and
+    /// reuse that exact description.
+    nonisolated private static func typeDescription(for url: URL, isDirectory: Bool, isPackage: Bool) -> String {
+        guard !isDirectory || isPackage else { return "" }
+        let ext = url.pathExtension.lowercased()
+        if !ext.isEmpty, let cached = FileTypeDescriptionStore.shared.descriptions.object(forKey: ext as NSString) {
+            return cached as String
+        }
+
+        let description = (try? url.resourceValues(forKeys: [.localizedTypeDescriptionKey]))?
+            .localizedTypeDescription ?? ""
+        if !ext.isEmpty {
+            FileTypeDescriptionStore.shared.descriptions.setObject(description as NSString, forKey: ext as NSString)
+        }
+        return description
     }
 
     nonisolated private static func aliasTargetURL(for url: URL) -> URL? {

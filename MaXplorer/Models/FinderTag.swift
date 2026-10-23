@@ -82,3 +82,13 @@ nonisolated enum FinderTagReader {
         return colors
     }
 }
+
+/// Reads tags for rows that are actually on screen. Directory listings skip
+/// tag xattrs entirely, so a large folder pays for only its visible rows.
+nonisolated enum FinderTagLoader {
+    static func colors(for url: URL) async -> [FinderTagColor] {
+        await Task.detached(priority: .utility) {
+            FinderTagReader.tagColors(for: url)
+        }.value
+    }
+}

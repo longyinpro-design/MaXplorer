@@ -282,14 +282,16 @@ final class CopyQueueViewModel: ObservableObject {
 
         tasks[itemID] = Task {
             do {
-                let totalBytes = try await CopyWorker.totalByteCount(for: sourceURL)
-                updateTotalBytes(totalBytes, for: itemID)
-
                 try await CopyWorker.perform(
                     operation,
                     sourceURL: sourceURL,
                     destinationURL: destinationURL,
-                    overwrite: shouldOverwrite
+                    overwrite: shouldOverwrite,
+                    totalBytes: { total in
+                        Task { @MainActor in
+                            self.updateTotalBytes(total, for: itemID)
+                        }
+                    }
                 ) { copiedBytes in
                     guard progressThrottle.shouldPublish() else {
                         return

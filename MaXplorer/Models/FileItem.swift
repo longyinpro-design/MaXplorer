@@ -81,7 +81,7 @@ extension FileItem {
         return nil
     }
 
-    var displayKind: String {
+    nonisolated var displayKind: String {
         if isNetworkLocation {
             return typeDescription.isEmpty ? "网络位置" : typeDescription
         }
@@ -113,7 +113,7 @@ extension FileItem {
         return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 
-    var sortSize: Int64 {
+    nonisolated var sortSize: Int64 {
         guard !opensInApp, let size else {
             return -1
         }
@@ -121,19 +121,19 @@ extension FileItem {
         return size
     }
 
-    var sortModifiedAt: Date {
+    nonisolated var sortModifiedAt: Date {
         modifiedAt ?? .distantPast
     }
 
-    var sortCreatedAt: Date {
+    nonisolated var sortCreatedAt: Date {
         createdAt ?? .distantPast
     }
 
-    var sortDateTaken: Date {
+    nonisolated var sortDateTaken: Date {
         dateTaken ?? .distantPast
     }
 
-    var sortOwner: String {
+    nonisolated var sortOwner: String {
         owner ?? ""
     }
 

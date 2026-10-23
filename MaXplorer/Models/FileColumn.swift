@@ -3,7 +3,7 @@ import Foundation
 /// A selectable column in the file table. `name` is always shown and cannot be
 /// hidden; the rest can be toggled from the column chooser and are persisted.
 /// Declaration order here is the canonical left-to-right display order.
-enum FileColumn: String, CaseIterable, Identifiable, Codable {
+enum FileColumn: String, CaseIterable, Identifiable, Codable, Sendable {
     case name
     case kind
     case size
@@ -35,13 +35,14 @@ enum FileColumn: String, CaseIterable, Identifiable, Codable {
 }
 
 extension DirectoryListingOptions {
-    /// Only fetch the slow per-file metadata when its column is visible. Tag
-    /// colors are always wanted for local listings; network volumes skip them.
+    /// Only fetch the slow per-file metadata when its column is visible. Finder
+    /// tag colors are loaded lazily by the icon renderer for visible rows, so
+    /// listing a large folder does not pay one xattr read per item.
     init(columns: Set<FileColumn>) {
         self.init(
             includeOwner: columns.contains(.owner),
             includeDateTaken: columns.contains(.dateTaken),
-            includeTags: true
+            includeTags: false
         )
     }
 }
@@ -49,7 +50,7 @@ extension DirectoryListingOptions {
 /// A single-column sort: the column the table is sorted by and its direction.
 /// Stored per folder and as the app-wide default, so it has to be Codable,
 /// which `KeyPathComparator` is not.
-struct FileSortDescriptor: Equatable, Codable {
+struct FileSortDescriptor: Equatable, Codable, Sendable {
     var column: FileColumn
     var ascending: Bool
 
@@ -100,7 +101,7 @@ extension FileColumn {
 /// key path (and rebuilds computed values such as the kind string) on every
 /// comparison; here each item's sort key is computed once and the comparisons
 /// run on plain arrays. Ties fall back to the name, like Finder.
-enum FileSorter {
+nonisolated enum FileSorter {
     static func sorted(_ items: [FileItem], by descriptor: FileSortDescriptor) -> [FileItem] {
         guard items.count > 1 else {
             return items
@@ -159,7 +160,7 @@ enum FileSorter {
     }
 }
 
-private extension ComparisonResult {
+nonisolated private extension ComparisonResult {
     var reversed: ComparisonResult {
         switch self {
         case .orderedAscending: return .orderedDescending

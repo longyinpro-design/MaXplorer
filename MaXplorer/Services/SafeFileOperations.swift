@@ -1,11 +1,20 @@
 import Foundation
 import Darwin
 
-/// One mutation lane covers both queue and service callers. Publication uses a
-/// same-filesystem rename, never a remove-then-copy window. External writers are
-/// detected by metadata snapshots; this is not a filesystem snapshot or journal.
+/// Validation and publication are serialized across queue and service callers.
+/// Payload copying runs concurrently in private staging directories; only the
+/// final checks, rename, and source removal take the mutation lane. Publication
+/// uses a same-filesystem rename, never a remove-then-copy window. External
+/// writers are detected by metadata snapshots; this is not a filesystem snapshot
+/// or journal.
 nonisolated enum SafeFileOperations {
     private static let mutationLock = NSLock()
+
+    private static func withMutationLock<T>(_ body: () throws -> T) rethrows -> T {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        return try body()
+    }
 
     static func entryExists(at url: URL) -> Bool {
         var info = stat()
@@ -24,11 +33,12 @@ nonisolated enum SafeFileOperations {
         sourceURL: URL,
         destinationURL: URL,
         overwrite: Bool,
+        totalBytes: @escaping @Sendable (Int64) -> Void = { _ in },
         progress: @escaping @Sendable (Int64) -> Void
     ) async throws {
         let worker = Task.detached(priority: .background) {
             try transact(operation, source: sourceURL, destination: destinationURL,
-                         overwrite: overwrite, progress: progress)
+                         overwrite: overwrite, totalBytes: totalBytes, progress: progress)
         }
         try await withTaskCancellationHandler {
             try await worker.value
@@ -37,10 +47,10 @@ nonisolated enum SafeFileOperations {
 
     private static func transact(
         _ operation: CopyQueueOperation, source: URL, destination: URL,
-        overwrite: Bool, progress: @escaping @Sendable (Int64) -> Void
+        overwrite: Bool,
+        totalBytes: @escaping @Sendable (Int64) -> Void,
+        progress: @escaping @Sendable (Int64) -> Void
     ) throws {
-        mutationLock.lock()
-        defer { mutationLock.unlock() }
         try Task.checkCancellation()
         guard source.isFileURL, destination.isFileURL,
               source.path != "/", destination.path != "/" else {
@@ -67,6 +77,10 @@ nonisolated enum SafeFileOperations {
         if destinationInfo != nil && !overwrite { throw CocoaError(.fileWriteFileExists) }
 
         let before = try snapshot(source)
+        // The queue needs the total before byte progress starts. Reuse the
+        // snapshot that change detection already requires instead of walking
+        // the tree a second time.
+        totalBytes(before.bytes)
         // Editing an existing descendant does not change a directory's own
         // mtime/ctime. Include its complete old tree before an overwrite.
         let destinationBefore = destinationInfo?.isDirectory == true ? try snapshot(destination) : nil
@@ -75,13 +89,27 @@ nonisolated enum SafeFileOperations {
         try destinationParent.validate()
         // An exclusive rename is sufficient for a same-volume non-overwrite move.
         if operation == .move, destinationInfo == nil {
-            if renameatx_np(sourceParent.fd, source.lastPathComponent,
-                            destinationParent.fd, destination.lastPathComponent, UInt32(RENAME_EXCL)) == 0 {
+            let renameResult = try withMutationLock { () -> Int32 in
+                try sourceParent.validate()
+                try destinationParent.validate()
+                guard try info(source)?.sameObject(as: sourceInfo) == true else {
+                    throw Failure("移动前源项目发生变化。未移动任何项目。")
+                }
+                guard try info(destination) == destinationInfo else {
+                    throw Failure("移动前目标项目发生变化。未移动任何项目。")
+                }
+                if renameatx_np(sourceParent.fd, source.lastPathComponent,
+                                destinationParent.fd, destination.lastPathComponent,
+                                UInt32(RENAME_EXCL)) == 0 {
+                    return 0
+                }
+                return errno
+            }
+            if renameResult == 0 {
                 progress(before.bytes)
                 return
             }
-            let code = errno
-            guard code == EXDEV else { throw posix(code, destination) }
+            guard renameResult == EXDEV else { throw posix(renameResult, destination) }
         }
 
         var template = Array(destination.deletingLastPathComponent()
@@ -94,48 +122,51 @@ nonisolated enum SafeFileOperations {
         do {
             let stagingHandle = try DirectoryHandle(staging)
             try copy(source, to: payload, progress: progress)
-            guard try snapshot(source) == before else {
-                throw Failure("复制期间源项目发生变化。未替换任何项目。")
-            }
-            try sourceParent.validate()
-            try destinationParent.validate()
-            guard try info(destination) == destinationInfo else {
-                throw Failure("复制期间目标项目发生变化。未替换任何项目。")
-            }
-            if let destinationBefore, try snapshot(destination) != destinationBefore {
-                throw Failure("复制期间目标内容发生变化。未替换任何项目。")
-            }
-            try Task.checkCancellation()
-            // Darwin can reject renaming a write-disabled directory. Change
-            // only our private copy, retain its fd across the swap, and restore
-            // its exact mode immediately after publication (before source removal).
-            let payloadInfo = try requiredInfo(payload)
-            let payloadHandle = payloadInfo.isDirectory ? try DirectoryHandle(payload) : nil
-            if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode | S_IWUSR) != 0 {
-                throw posix(errno, payload)
-            }
-            let flags = destinationInfo == nil ? UInt32(RENAME_EXCL) : UInt32(RENAME_SWAP)
-            let renamed = renameatx_np(stagingHandle.fd, "payload", destinationParent.fd,
-                                      destination.lastPathComponent, flags)
-            let renameError = errno
-            published = renamed == 0
-            if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode) != 0, published {
-                keepRecovery = true
-                throw Failure("副本已保存到 \(destination.path)，但无法恢复其目录权限：\(posix(errno, destination).localizedDescription)")
-            }
-            guard published else { throw posix(renameError, destination) }
-            // Publication is the commit point. Cancellation after it must not
-            // remove the complete target or report an operation as cancelled.
-            progress(before.bytes)
-            if operation == .move {
-                do {
-                    try sourceParent.validate()
-                    guard try snapshot(source, checkCancellation: false) == before else {
-                        throw Failure("移除源项目之前，源项目已发生变化。")
+
+            try withMutationLock {
+                guard try snapshot(source) == before else {
+                    throw Failure("复制期间源项目发生变化。未替换任何项目。")
+                }
+                try sourceParent.validate()
+                try destinationParent.validate()
+                guard try info(destination) == destinationInfo else {
+                    throw Failure("复制期间目标项目发生变化。未替换任何项目。")
+                }
+                if let destinationBefore, try snapshot(destination) != destinationBefore {
+                    throw Failure("复制期间目标内容发生变化。未替换任何项目。")
+                }
+                try Task.checkCancellation()
+                // Darwin can reject renaming a write-disabled directory. Change
+                // only our private copy, retain its fd across the swap, and restore
+                // its exact mode immediately after publication (before source removal).
+                let payloadInfo = try requiredInfo(payload)
+                let payloadHandle = payloadInfo.isDirectory ? try DirectoryHandle(payload) : nil
+                if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode | S_IWUSR) != 0 {
+                    throw posix(errno, payload)
+                }
+                let flags = destinationInfo == nil ? UInt32(RENAME_EXCL) : UInt32(RENAME_SWAP)
+                let renamed = renameatx_np(stagingHandle.fd, "payload", destinationParent.fd,
+                                          destination.lastPathComponent, flags)
+                let renameError = errno
+                published = renamed == 0
+                if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode) != 0, published {
+                    keepRecovery = true
+                    throw Failure("副本已保存到 \(destination.path)，但无法恢复其目录权限：\(posix(errno, destination).localizedDescription)")
+                }
+                guard published else { throw posix(renameError, destination) }
+                // Publication is the commit point. Cancellation after it must not
+                // remove the complete target or report an operation as cancelled.
+                progress(before.bytes)
+                if operation == .move {
+                    do {
+                        try sourceParent.validate()
+                        guard try snapshot(source, checkCancellation: false) == before else {
+                            throw Failure("移除源项目之前，源项目已发生变化。")
+                        }
+                        try FileManager.default.removeItem(at: source)
+                    } catch {
+                        throw Failure("完整副本位于 \(destination.path)，但无法完全移除源项目。已保留两个位置以供检查。\(error.localizedDescription)")
                     }
-                    try FileManager.default.removeItem(at: source)
-                } catch {
-                    throw Failure("完整副本位于 \(destination.path)，但无法完全移除源项目。已保留两个位置以供检查。\(error.localizedDescription)")
                 }
             }
         } catch {
