@@ -9,6 +9,7 @@ MaXplorer is a native macOS file manager that combines Windows Explorer-style na
 - **Paste straight into another tab** — copy or cut items, then use a destination tab's context menu to paste there without navigating away from the folder you are viewing.
 - **Visible, responsive copy and move queue** — watch every active transfer in a dedicated queue with per-file progress, overall progress, transfer speed, and estimated time remaining. Network conflict checks and progress updates run without blocking the interface, and you choose how many files MaXplorer processes concurrently.
 - **Granular conflict resolution** — when pasting or dropping files that already exist, choose Overwrite, Overwrite All, Skip, Skip All, or Cancel — one conflict at a time, with no surprises.
+- **Undo for renames, moves and copies** — `⌘Z` restores the last rename, move, or non-overwriting copy, including a whole batch in one step. Every entry is verified right before it is reverted, so items you edited in the meantime are never overwritten or deleted; overwritten files stay in the undo history marked as not undoable, and the history is cleared when MaXplorer quits.
 - **Built-in Space Analyzer** — scan any folder into an interactive, colour-coded treemap, monitor scanning live, and open, browse to, or copy the path of large items directly. There is no need to install a separate disk-usage visualizer.
 - **Integrated terminal** — open a terminal pane inside the current tab, already set to that folder, or launch a separate Terminal window from the toolbar or context menu.
 - **Instant folder filtering** — `⌥⌘F` focuses a live filter field that narrows the current folder in real time, no Spotlight index required.
@@ -39,6 +40,7 @@ MaXplorer is a native macOS file manager that combines Windows Explorer-style na
 | `⌘C` | Copy selected items |
 | `⌘X` | Cut selected items for move on paste |
 | `⌘V` | Paste copied or cut items |
+| `⌘Z` | Undo the last rename, move, or non-overwriting copy |
 | `⌘A` | Select all items in the current folder |
 | `⌘⌥C` | Copy selected path, or current folder path if nothing is selected |
 

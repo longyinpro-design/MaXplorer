@@ -41,6 +41,18 @@ struct MaXplorerApp: App {
         }
         .defaultSize(width: 1180, height: 720)
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button(model.undoActionTitle.map { "撤销\($0)" } ?? "撤销") {
+                    Task { await model.undoLastOperation() }
+                }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!model.canUndo)
+
+                Button("撤销历史…") {
+                    model.showUndoHistory()
+                }
+            }
+
             CommandGroup(replacing: .appInfo) {
                 Button("关于 MaXplorer") {
                     model.showAbout()
@@ -79,6 +91,11 @@ struct MaXplorerApp: App {
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(!model.canCreateFolder)
 
+                Button("新建文件…") {
+                    model.showNewFile()
+                }
+                .disabled(!model.canCreateFolder)
+
                 Divider()
 
                 Button("重命名") {
@@ -87,11 +104,51 @@ struct MaXplorerApp: App {
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(model.selectedItem?.isNetworkLocation ?? true)
 
+                Button("复制副本") {
+                    model.duplicateSelected()
+                }
+                .disabled(!model.canDuplicateSelected)
+
+                Button("显示简介") {
+                    model.showInfoSelected()
+                }
+                .keyboardShortcut("i", modifiers: .command)
+                .disabled(!model.canShowInfo)
+
                 Button(model.selectedItemsRequirePermanentDeletion ? "永久删除" : "移到废纸篓") {
                     model.requestTrashSelected()
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(!model.canTrashSelectedItems)
+
+                Divider()
+
+                Button("复制到…") {
+                    model.chooseDestination(for: .copy)
+                }
+                .disabled(!model.canCopySelectedItem)
+
+                Button("移动到…") {
+                    model.chooseDestination(for: .move)
+                }
+                .disabled(!model.canCutSelectedItem)
+
+                Divider()
+
+                Button("压缩为 ZIP…") {
+                    model.showCompressPanel(format: .zip)
+                }
+                .disabled(!model.canCompressSelected)
+
+                Button("压缩为 TAR.GZ…") {
+                    model.showCompressPanel(format: .tarGz)
+                }
+                .disabled(!model.canCompressSelected)
+
+                Button("解压…") {
+                    model.showExtractPanel()
+                }
+                .disabled(!model.canExtractSelected)
 
                 Divider()
 
@@ -152,6 +209,21 @@ struct MaXplorerApp: App {
                     model.focusFilterField()
                 }
                 .keyboardShortcut("f", modifiers: [.command, .option])
+
+                Button("搜索文件…") {
+                    if tabs.isSearchActive {
+                        tabs.searchModel?.focusSearchField()
+                    } else {
+                        tabs.openSearch(scopeRoot: model.currentURL)
+                    }
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(!model.canSearch || (!tabs.canAddTab && !tabs.isSearchActive))
+
+                Button("选择匹配项…") {
+                    model.showSelectPattern()
+                }
+                .disabled(!model.canSelectAll)
 
                 Divider()
 

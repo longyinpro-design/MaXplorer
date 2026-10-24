@@ -346,6 +346,23 @@ extension FileOperationTests {
             try await move(source, target, overwrite: false)
             try expect(contents(target) == "source" && !SafeFileOperations.entryExists(at: source), "cross-volume move incomplete")
         }
+        await test("real cross-volume overwrite publishes complete content") { dir in
+            let targetDir = try directory(volume, UUID().uuidString)
+            defer { try? fm.removeItem(at: targetDir) }
+            let source = try file(dir, "source", "new")
+            let target = try file(targetDir, "target", "old")
+
+            try await CopyWorker.perform(
+                .copy,
+                sourceURL: source,
+                destinationURL: target,
+                overwrite: true,
+                progress: { _ in }
+            )
+            try expect(contents(target) == "new", "cross-volume overwrite did not publish")
+            try expect(contents(source) == "new", "cross-volume overwrite removed source")
+            try noStaging(targetDir)
+        }
         await test("source removal failure preserves complete cross-volume target") { dir in
             let targetDir = try directory(volume, UUID().uuidString)
             defer { try? fm.removeItem(at: targetDir) }
@@ -356,6 +373,41 @@ extension FileOperationTests {
             defer { chmod(parent.path, 0o755) }
             try await mustFail { try await move(source, target, overwrite: false) }
             try expect(contents(target) == "source" && contents(source) == "source", "valid target was rolled back")
+            try noStaging(targetDir)
+        }
+        if let lowSpaceRoot = ProcessInfo.processInfo.environment["MAXPLORER_LOW_SPACE_ROOT"] {
+            await lowSpaceTests(URL(fileURLWithPath: lowSpaceRoot, isDirectory: true))
+        } else {
+            print("NOT_PROVEN low-space tests: set MAXPLORER_LOW_SPACE_ROOT to a small filesystem")
+        }
+    }
+
+    static func lowSpaceTests(_ volume: URL) async {
+        await test("low-space overwrite preserves source and old destination") { dir in
+            let targetDir = try directory(volume, UUID().uuidString)
+            defer { try? fm.removeItem(at: targetDir) }
+            let target = try file(targetDir, "target", "old")
+            let source = dir.appendingPathComponent("large.bin")
+            try Data(repeating: 0x5a, count: 32 * 1024 * 1024).write(to: source)
+
+            do {
+                try await CopyWorker.perform(
+                    .copy,
+                    sourceURL: source,
+                    destinationURL: target,
+                    overwrite: true,
+                    progress: { _ in }
+                )
+                throw TestFailure.assertion("low-space copy unexpectedly succeeded")
+            } catch is TestFailure {
+                throw TestFailure.assertion("low-space copy unexpectedly succeeded")
+            } catch {
+                // Expected ENOSPC or a preflight space failure.
+            }
+
+            try expect(contents(target) == "old", "low-space copy damaged the old destination")
+            let sourceSize = try Data(contentsOf: source).count
+            try expect(sourceSize == 32 * 1024 * 1024, "low-space copy damaged the source")
             try noStaging(targetDir)
         }
     }

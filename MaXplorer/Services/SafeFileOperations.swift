@@ -9,6 +9,16 @@ import Darwin
 /// or journal.
 nonisolated enum SafeFileOperations {
     private static let mutationLock = NSLock()
+    private static let capabilityLock = NSLock()
+    private static var swapUnsupportedVolumes = Set<String>()
+    private static let fallbackOverrideLock = NSLock()
+    private static var forceSwapFallbackOverride = false
+
+    static func setForcedSwapFallbackForTesting(_ enabled: Bool) {
+        fallbackOverrideLock.lock()
+        forceSwapFallbackOverride = enabled
+        fallbackOverrideLock.unlock()
+    }
 
     private static func withMutationLock<T>(_ body: () throws -> T) rethrows -> T {
         mutationLock.lock()
@@ -63,15 +73,17 @@ nonisolated enum SafeFileOperations {
         let destinationParent = try DirectoryHandle(destination.deletingLastPathComponent())
         let sourceInfo = try requiredInfo(source)
         let destinationInfo = try info(destination)
+        let sourceParentURL = source.deletingLastPathComponent()
+        let destinationParentURL = destination.deletingLastPathComponent()
         guard source != destination, !sourceInfo.sameObject(as: destinationInfo) else {
             throw Failure("源位置与目标位置指向同一文件系统对象。")
         }
         if sourceInfo.isDirectory,
-           try hasAncestor(destination.deletingLastPathComponent(), matching: sourceInfo) {
+           try hasAncestor(destinationParentURL, matching: sourceInfo) {
             throw Failure("无法将文件夹复制或移动到其自身内部。")
         }
         if let destinationInfo, destinationInfo.isDirectory,
-           try hasAncestor(source.deletingLastPathComponent(), matching: destinationInfo) {
+           try hasAncestor(sourceParentURL, matching: destinationInfo) {
             throw Failure("目标位置包含源项目，无法替换。")
         }
         if destinationInfo != nil && !overwrite { throw CocoaError(.fileWriteFileExists) }
@@ -112,6 +124,16 @@ nonisolated enum SafeFileOperations {
             guard renameResult == EXDEV else { throw posix(renameResult, destination) }
         }
 
+        let swapSupported = destinationInfo != nil
+            ? supportsSwapRename(at: destinationParentURL)
+            : true
+        if let free = VolumeCapacityReader.stats(for: destinationParentURL)?.free {
+            let required = UInt64(max(0, before.bytes))
+            if required > free {
+                throw Failure("目标空间不足：需要 \(formattedBytes(before.bytes))，可用 \(formattedBytes(Int64(min(free, UInt64(Int64.max)))))。未修改任何项目。")
+            }
+        }
+
         var template = Array(destination.deletingLastPathComponent()
             .appendingPathComponent(".maxplorer-transfer-XXXXXX").path.utf8CString)
         guard mkdtemp(&template) != nil else { throw posix(errno, destination) }
@@ -119,6 +141,7 @@ nonisolated enum SafeFileOperations {
         let payload = staging.appendingPathComponent("payload")
         var published = false
         var keepRecovery = false
+        var backupToRemove: URL?
         do {
             let stagingHandle = try DirectoryHandle(staging)
             try copy(source, to: payload, progress: progress)
@@ -144,16 +167,55 @@ nonisolated enum SafeFileOperations {
                 if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode | S_IWUSR) != 0 {
                     throw posix(errno, payload)
                 }
-                let flags = destinationInfo == nil ? UInt32(RENAME_EXCL) : UInt32(RENAME_SWAP)
-                let renamed = renameatx_np(stagingHandle.fd, "payload", destinationParent.fd,
-                                          destination.lastPathComponent, flags)
-                let renameError = errno
-                published = renamed == 0
+
+                if destinationInfo == nil {
+                    let renamed = renameatx_np(
+                        stagingHandle.fd,
+                        "payload",
+                        destinationParent.fd,
+                        destination.lastPathComponent,
+                        UInt32(RENAME_EXCL)
+                    )
+                    guard renamed == 0 else { throw posix(errno, destination) }
+                    published = true
+                } else if swapSupported {
+                    let renamed = renameatx_np(
+                        stagingHandle.fd,
+                        "payload",
+                        destinationParent.fd,
+                        destination.lastPathComponent,
+                        UInt32(RENAME_SWAP)
+                    )
+                    if renamed == 0 {
+                        published = true
+                    } else {
+                        let renameError = errno
+                        guard isSwapUnsupported(renameError) else {
+                            throw posix(renameError, destination)
+                        }
+                        markSwapUnsupported(at: destinationParentURL)
+                        backupToRemove = try publishWithBackup(
+                            stagingHandle: stagingHandle,
+                            destinationParent: destinationParent,
+                            destination: destination
+                        )
+                        published = true
+                    }
+                } else {
+                    backupToRemove = try publishWithBackup(
+                        stagingHandle: stagingHandle,
+                        destinationParent: destinationParent,
+                        destination: destination
+                    )
+                    published = true
+                }
+
                 if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode) != 0, published {
                     keepRecovery = true
-                    throw Failure("副本已保存到 \(destination.path)，但无法恢复其目录权限：\(posix(errno, destination).localizedDescription)")
+                    let backupNote = backupToRemove.map { " 旧目标备份保留在 \($0.path)。" } ?? ""
+                    throw Failure("副本已保存到 \(destination.path)，但无法恢复其目录权限：\(posix(errno, destination).localizedDescription)\(backupNote)")
                 }
-                guard published else { throw posix(renameError, destination) }
+                guard published else { throw posix(errno, destination) }
                 // Publication is the commit point. Cancellation after it must not
                 // remove the complete target or report an operation as cancelled.
                 progress(before.bytes)
@@ -171,21 +233,38 @@ nonisolated enum SafeFileOperations {
             }
         } catch {
             let original = error
+            let isCancellation = original is CancellationError
+            let reported = isCancellation
+                ? original
+                : enrichedOperationError(
+                    original,
+                    destinationDirectory: destinationParentURL,
+                    requiredBytes: before.bytes
+                )
+            let backupNote = backupToRemove.map { " 旧目标备份保留在 \($0.path)。" } ?? ""
             if keepRecovery {
-                throw Failure("\(original.localizedDescription) 恢复文件保留在 \(staging.path)。未移除源项目。")
+                throw Failure("\(reported.localizedDescription) 恢复文件保留在 \(staging.path)。\(backupNote)未移除源项目。")
             }
             do {
                 if !published { try prepareToDiscard(staging) }
                 try FileManager.default.removeItem(at: staging)
             }
             catch {
-                throw Failure("\(original.localizedDescription) 恢复文件保留在 \(staging.path)：\(error.localizedDescription)")
+                throw Failure("\(reported.localizedDescription) 恢复文件保留在 \(staging.path)：\(error.localizedDescription)\(backupNote)")
             }
-            throw original
+            if isCancellation { throw CancellationError() }
+            throw Failure("\(reported.localizedDescription)\(backupNote)")
         }
         do { try FileManager.default.removeItem(at: staging) }
         catch {
-            throw Failure("目标项目已保存。恢复文件保留在 \(staging.path)：\(error.localizedDescription)")
+            let backupNote = backupToRemove.map { " 旧目标备份保留在 \($0.path)。" } ?? ""
+            throw Failure("目标项目已保存。恢复文件保留在 \(staging.path)：\(error.localizedDescription)\(backupNote)")
+        }
+        if let backupToRemove {
+            do { try removeBackup(backupToRemove) }
+            catch {
+                throw Failure("目标项目已保存。旧目标备份保留在 \(backupToRemove.path)：\(error.localizedDescription)")
+            }
         }
     }
 
@@ -194,12 +273,164 @@ nonisolated enum SafeFileOperations {
             .appendingPathComponent(url.lastPathComponent).standardizedFileURL
     }
 
+    // MARK: - Volume capabilities
+
+    private static func supportsSwapRename(at directory: URL) -> Bool {
+        if isSwapFallbackForced() { return false }
+
+        let volume = volumeIdentifier(for: directory)
+        capabilityLock.lock()
+        let isKnownUnsupported = swapUnsupportedVolumes.contains(volume)
+        capabilityLock.unlock()
+        if isKnownUnsupported { return false }
+
+        guard let probe = try? makeSwapProbe(in: directory) else { return true }
+        defer {
+            close(probe.fd)
+            try? FileManager.default.removeItem(at: probe.url)
+        }
+
+        if renameatx_np(probe.fd, "a", probe.fd, "b", UInt32(RENAME_SWAP)) == 0 {
+            return true
+        }
+        let code = errno
+        guard isSwapUnsupported(code) else { return true }
+        markSwapUnsupported(volume: volume)
+        return false
+    }
+
+    private static func markSwapUnsupported(at directory: URL) {
+        markSwapUnsupported(volume: volumeIdentifier(for: directory))
+    }
+
+    private static func markSwapUnsupported(volume: String) {
+        capabilityLock.lock()
+        swapUnsupportedVolumes.insert(volume)
+        capabilityLock.unlock()
+    }
+
+    private static func isSwapUnsupported(_ code: Int32) -> Bool {
+        code == EINVAL || code == ENOTSUP || code == ENOSYS || code == EXDEV
+    }
+
+    private static func isSwapFallbackForced() -> Bool {
+        fallbackOverrideLock.lock()
+        defer { fallbackOverrideLock.unlock() }
+        return forceSwapFallbackOverride
+    }
+
+    private static func volumeIdentifier(for directory: URL) -> String {
+        var info = statfs()
+        guard statfs(directory.path, &info) == 0 else { return directory.path }
+        return withUnsafePointer(to: &info.f_mntonname) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    private static func makeSwapProbe(in directory: URL) throws -> (url: URL, fd: Int32) {
+        var template = Array(
+            directory.appendingPathComponent(".maxplorer-probe-XXXXXX").path.utf8CString
+        )
+        guard mkdtemp(&template) != nil else { throw posix(errno, directory) }
+        let probeURL = URL(fileURLWithPath: String(cString: template), isDirectory: true)
+        let fd = open(probeURL.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else {
+            try? FileManager.default.removeItem(at: probeURL)
+            throw posix(errno, probeURL)
+        }
+
+        for name in ["a", "b"] {
+            let fileDescriptor = openat(fd, name, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+            if fileDescriptor < 0 {
+                close(fd)
+                try? FileManager.default.removeItem(at: probeURL)
+                throw posix(errno, probeURL)
+            }
+            close(fileDescriptor)
+        }
+        return (probeURL, fd)
+    }
+
+    /// SMB and some non-APFS volumes cannot atomically swap two names. This
+    /// fallback keeps the old destination under a private backup name until the
+    /// staged payload has been published, and rolls it back on failure.
+    private static func publishWithBackup(
+        stagingHandle: DirectoryHandle,
+        destinationParent: DirectoryHandle,
+        destination: URL
+    ) throws -> URL {
+        let backupName = ".maxplorer-backup-\(UUID().uuidString)"
+        let backupURL = destinationParent.url.appendingPathComponent(backupName)
+
+        guard renameatx_np(
+            destinationParent.fd,
+            destination.lastPathComponent,
+            destinationParent.fd,
+            backupName,
+            UInt32(RENAME_EXCL)
+        ) == 0 else {
+            throw posix(errno, destination)
+        }
+
+        guard renameatx_np(
+            stagingHandle.fd,
+            "payload",
+            destinationParent.fd,
+            destination.lastPathComponent,
+            UInt32(RENAME_EXCL)
+        ) == 0 else {
+            let publishCode = errno
+            let rollback = renameatx_np(
+                destinationParent.fd,
+                backupName,
+                destinationParent.fd,
+                destination.lastPathComponent,
+                UInt32(RENAME_EXCL)
+            )
+            if rollback != 0 {
+                throw Failure("发布失败，旧目标备份保留在 \(backupURL.path)，且无法恢复原名称。")
+            }
+            throw posix(publishCode, destination)
+        }
+
+        return backupURL
+    }
+
+    private static func removeBackup(_ url: URL) throws {
+        try prepareToDiscard(url)
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private static func formattedBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func enrichedOperationError(
+        _ error: Error,
+        destinationDirectory: URL,
+        requiredBytes: Int64
+    ) -> Error {
+        let nsError = error as NSError
+        if nsError.code == Int(ENOSPC) {
+            let free = VolumeCapacityReader.stats(for: destinationDirectory)?.free
+            let freeText = free.map { formattedBytes(Int64(min($0, UInt64(Int64.max)))) } ?? "未知"
+            return Failure("目标空间不足：需要 \(formattedBytes(requiredBytes))，可用 \(freeText)。未替换任何项目。")
+        }
+        if nsError.code == Int(ENOTCONN) || nsError.code == Int(ETIMEDOUT) || nsError.code == Int(EHOSTDOWN) {
+            return Failure("目标位置连接中断。未替换任何项目；恢复连接后请重试。")
+        }
+        return error
+    }
+
     private static func hasAncestor(_ url: URL, matching object: Fingerprint) throws -> Bool {
-        var current = url
+        var current = url.standardizedFileURL
         while true {
             if object.sameObject(as: try requiredInfo(current)) { return true }
-            let parent = current.deletingLastPathComponent()
-            if parent == current { return false }
+            if current.path == "/" { return false }
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            if parent.path == current.path { return false }
             current = parent
         }
     }

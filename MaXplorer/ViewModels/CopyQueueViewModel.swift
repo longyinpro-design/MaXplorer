@@ -25,6 +25,15 @@ enum CopyQueueItemState: Equatable {
             return false
         }
     }
+
+    var canRetry: Bool {
+        switch self {
+        case .failed, .cancelled:
+            return true
+        case .pending, .running, .completed:
+            return false
+        }
+    }
 }
 
 nonisolated enum CopyQueueOperation: Equatable, Sendable {
@@ -34,10 +43,13 @@ nonisolated enum CopyQueueOperation: Equatable, Sendable {
 
 struct CopyQueueItem: Identifiable, Equatable {
     let id: UUID
+    /// Groups every item enqueued by one paste/duplicate/move so undo can
+    /// restore the whole batch with a single ⌘Z.
+    let batchID: UUID
     let sourceURL: URL
     let destinationURL: URL
     let name: String
-    let shouldOverwrite: Bool
+    var shouldOverwrite: Bool
     let operation: CopyQueueOperation
     var state: CopyQueueItemState
     var totalBytes: Int64
@@ -76,9 +88,11 @@ struct CopyQueueHistoryItem: Identifiable, Equatable {
 final class CopyQueueViewModel: ObservableObject {
     @Published private(set) var items: [CopyQueueItem] = []
     @Published private(set) var history: [CopyQueueHistoryItem] = []
+    @Published private(set) var isPaused = false
 
-    private var itemCompletionObservers: [(URL) -> Void] = []
+    private var itemCompletionObservers: [(URL, URL, CopyQueueOperation, Bool, UUID) -> Void] = []
     private var moveCompletionObservers: [(URL) -> Void] = []
+    private var batchCompletionObservers: [(UUID) -> Void] = []
 
     var maximumConcurrentCopies = 3 {
         didSet {
@@ -110,6 +124,18 @@ final class CopyQueueViewModel: ObservableObject {
         activeCopyCount > 0
     }
 
+    var failedCount: Int {
+        items.filter { $0.state.canRetry }.count
+    }
+
+    var canPause: Bool {
+        !isPaused && hasActiveOperations
+    }
+
+    var canResume: Bool {
+        isPaused && hasActiveOperations
+    }
+
     var overallProgress: Double {
         guard aggregateTotalItemCount > 0 else {
             return 0
@@ -124,7 +150,7 @@ final class CopyQueueViewModel: ObservableObject {
         )
     }
 
-    func observeItemCompletions(_ observer: @escaping (URL) -> Void) {
+    func observeItemCompletions(_ observer: @escaping (URL, URL, CopyQueueOperation, Bool, UUID) -> Void) {
         itemCompletionObservers.append(observer)
     }
 
@@ -132,11 +158,22 @@ final class CopyQueueViewModel: ObservableObject {
         moveCompletionObservers.append(observer)
     }
 
+    /// Called once when no item of a batch is pending or running anymore, so
+    /// undo can record the finished batch as one history entry.
+    func observeBatchCompletions(_ observer: @escaping (UUID) -> Void) {
+        batchCompletionObservers.append(observer)
+    }
+
+    func hasActiveItems(inBatch batchID: UUID) -> Bool {
+        items.contains { $0.batchID == batchID && $0.state.isActive }
+    }
+
     func enqueue(_ sources: [URL], to destinationDirectory: URL, conflictResolution: CopyConflictResolution) {
         guard conflictResolution != .cancel else {
             return
         }
 
+        let batchID = UUID()
         let destinationDirectory = destinationDirectory.standardizedFileURL
         let shouldSkip = conflictResolution == .skip || conflictResolution == .skipAll
         let shouldOverwrite = conflictResolution == .overwrite || conflictResolution == .overwriteAll
@@ -154,6 +191,7 @@ final class CopyQueueViewModel: ObservableObject {
 
             return CopyQueueItem(
                 id: UUID(),
+                batchID: batchID,
                 sourceURL: source,
                 destinationURL: destination,
                 name: source.lastPathComponent,
@@ -176,6 +214,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     func enqueue(_ resolvedItems: [(source: URL, shouldOverwrite: Bool)], to destinationDirectory: URL) {
+        let batchID = UUID()
         let destinationDirectory = destinationDirectory.standardizedFileURL
         let newItems = resolvedItems.compactMap { (sourceURL, shouldOverwrite) -> CopyQueueItem? in
             let source = sourceURL.standardizedFileURL
@@ -185,6 +224,7 @@ final class CopyQueueViewModel: ObservableObject {
             let destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
             return CopyQueueItem(
                 id: UUID(),
+                batchID: batchID,
                 sourceURL: source,
                 destinationURL: destination,
                 name: source.lastPathComponent,
@@ -207,6 +247,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     func enqueueMoves(_ resolvedItems: [(source: URL, shouldOverwrite: Bool)], to destinationDirectory: URL) {
+        let batchID = UUID()
         let destinationDirectory = destinationDirectory.standardizedFileURL
         let newItems = resolvedItems.compactMap { sourceURL, shouldOverwrite -> CopyQueueItem? in
             let source = sourceURL.standardizedFileURL
@@ -216,11 +257,39 @@ final class CopyQueueViewModel: ObservableObject {
 
             return CopyQueueItem(
                 id: UUID(),
+                batchID: batchID,
                 sourceURL: source,
                 destinationURL: destinationDirectory.appendingPathComponent(source.lastPathComponent),
                 name: source.lastPathComponent,
                 shouldOverwrite: shouldOverwrite,
                 operation: .move,
+                state: .pending,
+                totalBytes: 0,
+                copiedBytes: 0,
+                bytesPerSecond: 0,
+                startedAt: nil
+            )
+        }
+
+        guard !newItems.isEmpty else {
+            return
+        }
+
+        appendToQueue(newItems)
+        startAvailableCopies()
+    }
+
+    func enqueueDuplicates(_ items: [(source: URL, destination: URL)]) {
+        let batchID = UUID()
+        let newItems = items.map { sourceURL, destinationURL -> CopyQueueItem in
+            CopyQueueItem(
+                id: UUID(),
+                batchID: batchID,
+                sourceURL: sourceURL.standardizedFileURL,
+                destinationURL: destinationURL.standardizedFileURL,
+                name: destinationURL.lastPathComponent,
+                shouldOverwrite: false,
+                operation: .copy,
                 state: .pending,
                 totalBytes: 0,
                 copiedBytes: 0,
@@ -250,7 +319,87 @@ final class CopyQueueViewModel: ObservableObject {
         }
     }
 
+    func pause() {
+        guard !isPaused else { return }
+        isPaused = true
+    }
+
+    func resume() {
+        guard isPaused else { return }
+        isPaused = false
+        startAvailableCopies()
+    }
+
+    func retry(_ itemID: CopyQueueItem.ID, shouldOverwrite: Bool? = nil) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].state.canRetry else {
+            return
+        }
+
+        if let shouldOverwrite {
+            items[index].shouldOverwrite = shouldOverwrite
+        }
+        guard resetForRetry(itemID) else { return }
+        startAvailableCopies()
+    }
+
+    func retryNeedsOverwrite(_ itemID: CopyQueueItem.ID) -> Bool {
+        guard let item = items.first(where: { $0.id == itemID }),
+              item.state.canRetry,
+              !item.shouldOverwrite else {
+            return false
+        }
+
+        return SafeFileOperations.entryExists(at: item.destinationURL)
+    }
+
+    func retryAllFailed() {
+        let failedIDs = items
+            .filter { $0.state.canRetry && !retryNeedsOverwrite($0.id) }
+            .map(\.id)
+        guard !failedIDs.isEmpty else { return }
+
+        for itemID in failedIDs {
+            _ = resetForRetry(itemID)
+        }
+        startAvailableCopies()
+    }
+
+    func dismiss(_ itemID: CopyQueueItem.ID) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              !items[index].state.isActive else {
+            return
+        }
+
+        tasks[itemID] = nil
+        items.remove(at: index)
+        aggregateTotalItemCount = max(0, aggregateTotalItemCount - 1)
+        aggregateFinishedItemCount = max(0, aggregateFinishedItemCount - 1)
+        if items.isEmpty {
+            aggregateTotalItemCount = 0
+            aggregateFinishedItemCount = 0
+        }
+    }
+
+    private func resetForRetry(_ itemID: CopyQueueItem.ID) -> Bool {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].state.canRetry else {
+            return false
+        }
+
+        tasks[itemID] = nil
+        aggregateFinishedItemCount = max(0, aggregateFinishedItemCount - 1)
+        items[index].state = .pending
+        items[index].totalBytes = 0
+        items[index].copiedBytes = 0
+        items[index].bytesPerSecond = 0
+        items[index].startedAt = nil
+        return true
+    }
+
     private func startAvailableCopies() {
+        guard !isPaused else { return }
+
         let runningCount = items.filter { $0.state == .running }.count
         let availableSlots = max(0, maximumConcurrentCopies - runningCount)
         guard availableSlots > 0 else {
@@ -341,6 +490,8 @@ final class CopyQueueViewModel: ObservableObject {
         let sourceURL = items[index].sourceURL
         let destinationURL = items[index].destinationURL
         let operation = items[index].operation
+        let shouldOverwrite = items[index].shouldOverwrite
+        let batchID = items[index].batchID
         let historyItem = CopyQueueHistoryItem(
             id: UUID(),
             sourceURL: sourceURL,
@@ -356,10 +507,11 @@ final class CopyQueueViewModel: ObservableObject {
             trimHistory()
         }
         aggregateFinishedItemCount += 1
-        itemCompletionObservers.forEach { $0(destinationURL) }
+        itemCompletionObservers.forEach { $0(sourceURL, destinationURL, operation, shouldOverwrite, batchID) }
         if operation == .move {
             moveCompletionObservers.forEach { $0(sourceURL) }
         }
+        notifyBatchSettled(batchID)
         startAvailableCopies()
     }
 
@@ -377,6 +529,7 @@ final class CopyQueueViewModel: ObservableObject {
 
         items[index].state = .cancelled
         aggregateFinishedItemCount += 1
+        notifyBatchSettled(items[index].batchID)
         startAvailableCopies()
     }
 
@@ -394,7 +547,13 @@ final class CopyQueueViewModel: ObservableObject {
 
         items[index].state = .failed(message)
         aggregateFinishedItemCount += 1
+        notifyBatchSettled(items[index].batchID)
         startAvailableCopies()
+    }
+
+    private func notifyBatchSettled(_ batchID: UUID) {
+        guard !hasActiveItems(inBatch: batchID) else { return }
+        batchCompletionObservers.forEach { $0(batchID) }
     }
 
     private func appendToQueue(_ newItems: [CopyQueueItem]) {

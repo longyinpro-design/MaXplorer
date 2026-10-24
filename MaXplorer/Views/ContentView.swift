@@ -36,6 +36,8 @@ private struct ActiveBrowserView: View {
     @State private var serverAddress = "smb://"
     @State private var manualFolderPath = ""
     @State private var manualFolderError: String?
+    @State private var selectPatternText = ""
+    @State private var selectPatternMode: SearchMatchMode = .glob
 
     var body: some View {
         Group {
@@ -43,7 +45,8 @@ private struct ActiveBrowserView: View {
                model.currentURL.isFileURL,
                model.detailDestination == .files,
                !tabs.isSpaceAnalyzerActive,
-               !tabs.isCopyQueueActive {
+               !tabs.isCopyQueueActive,
+               !tabs.isSearchActive {
                 VSplitView {
                     browserNavigationView
                         .layoutPriority(1)
@@ -77,6 +80,72 @@ private struct ActiveBrowserView: View {
                 }
             } onCancel: {
                 renameItem = nil
+            }
+        }
+        .sheet(isPresented: $model.isSelectPatternPresented) {
+            SelectItemsSheet(
+                pattern: $selectPatternText,
+                mode: $selectPatternMode
+            ) {
+                model.selectItems(matching: selectPatternText, mode: selectPatternMode)
+                model.isSelectPatternPresented = false
+            } onCancel: {
+                model.isSelectPatternPresented = false
+            }
+        }
+        .onChange(of: model.isSelectPatternPresented) { _, isPresented in
+            guard isPresented else { return }
+            selectPatternText = ""
+            selectPatternMode = .glob
+        }
+        .sheet(isPresented: $model.isNewFilePresented) {
+            NewFileSheet { name in
+                model.isNewFilePresented = false
+                Task { await model.createFile(named: name) }
+            } onCancel: {
+                model.isNewFilePresented = false
+            }
+        }
+        .sheet(item: $model.infoItem) { item in
+            FileInfoSheet(item: item, model: model)
+        }
+        .onChange(of: model.infoItem) { _, item in
+            if item == nil {
+                model.cancelInfoLoad()
+            }
+        }
+        .sheet(isPresented: $model.isTransferPlanPresented) {
+            TransferPlanSheet(model: model)
+        }
+        .sheet(isPresented: $model.isArchiveOperationPresented) {
+            ArchiveProgressSheet(model: model)
+        }
+        .sheet(isPresented: $model.isRecoveryNoticePresented) {
+            RecoveryResidueSheet(model: model)
+        }
+        .sheet(isPresented: $model.isUndoHistoryPresented) {
+            UndoHistorySheet(journal: model.undoJournal)
+        }
+        .confirmationDialog(
+            "解压时发现同名项目",
+            isPresented: Binding(
+                get: { model.archiveConflictRequest != nil },
+                set: { if !$0 { model.cancelArchiveConflictPrompt() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("覆盖", role: .destructive) {
+                model.resolveArchiveConflict(.overwrite)
+            }
+            Button("跳过同名项目") {
+                model.resolveArchiveConflict(.skip)
+            }
+            Button("取消", role: .cancel) {
+                model.resolveArchiveConflict(.cancel)
+            }
+        } message: {
+            if let request = model.archiveConflictRequest {
+                Text("“\(request.archiveName)”中有 \(request.conflictCount) 个顶层项目与目标位置同名。")
             }
         }
         .sheet(isPresented: $model.isConnectToServerPresented) {
@@ -251,7 +320,14 @@ private struct ActiveBrowserView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } detail: {
-            if tabs.isCopyQueueActive {
+            if tabs.isSearchActive {
+                SearchResultsSurface(
+                    model: model,
+                    renameItem: $renameItem,
+                    renameText: $renameText,
+                    itemsPendingTrash: $itemsPendingTrash
+                )
+            } else if tabs.isCopyQueueActive {
                 CopyQueueView(queue: model.copyQueue)
             } else if tabs.isSpaceAnalyzerActive {
                 SpaceAnalyzerView()
@@ -326,7 +402,18 @@ private struct BrowserTabStrip: View {
 
             HStack(spacing: tabSpacing) {
                 ForEach(tabs.tabs) { tab in
-                    if tab.id == tabs.spaceAnalyzerTabID {
+                    if tab.id == tabs.searchTabID {
+                        SearchTabButton(
+                            model: tab.model,
+                            isSelected: tab.id == tabs.selectedTabID,
+                            width: tabWidth,
+                            onSelect: { tabs.selectTab(tab.id) },
+                            onClose: { tabs.closeSearch() }
+                        )
+                        .contextMenu {
+                            Button("关闭搜索") { tabs.closeSearch() }
+                        }
+                    } else if tab.id == tabs.spaceAnalyzerTabID {
                         SpaceAnalyzerTabButton(
                             isSelected: tab.id == tabs.selectedTabID,
                             viewModel: tabs.spaceAnalyzerViewModel,
@@ -692,6 +779,63 @@ private struct SpaceAnalyzerTabButton: View {
     }
 }
 
+private struct SearchTabButton: View {
+    @Environment(\.appColorTheme) private var colorTheme
+    @ObservedObject var model: FileBrowserViewModel
+    let isSelected: Bool
+    let width: CGFloat
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var isHovering = false
+
+    private var title: String {
+        let query = model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? "搜索" : "搜索：\(query)"
+    }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button(action: onSelect) {
+                HStack(spacing: 6) {
+                    if model.isSearching {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 11, height: 11)
+                    } else if width >= 62 {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            TabCloseButton(isEnabled: true, action: onClose)
+        }
+        .padding(.leading, max(7, min(11, width / 12)))
+        .padding(.trailing, 5)
+        .frame(width: width, height: 26, alignment: .leading)
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .foregroundStyle(isSelected ? .primary : .secondary)
+        .background(
+            isSelected ? colorTheme.tintColor.opacity(0.18) :
+                (isHovering ? colorTheme.tintColor.opacity(0.09) : Color.clear),
+            in: RoundedRectangle(cornerRadius: 10)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(isSelected ? colorTheme.tintColor.opacity(0.5) : Color.clear, lineWidth: 1)
+        }
+        .onHover { isHovering = $0 }
+    }
+}
+
 private struct CopyQueueTabButton: View {
     @Environment(\.appColorTheme) private var colorTheme
     let isSelected: Bool
@@ -753,6 +897,7 @@ private struct SidebarView: View {
         VStack(spacing: 0) {
             List(selection: Binding<String?>(
             get: {
+                if tabs.isSearchActive { return nil }
                 if tabs.isSpaceAnalyzerActive { return spaceAnalyzerSelectionID }
                 if tabs.isCopyQueueActive { return copyQueueSelectionID }
                 switch model.detailDestination {
@@ -1070,6 +1215,14 @@ private struct BrowserToolbar: View {
                 }
 
                 ToolbarButtonGroup {
+                    ToolbarIconButton(
+                        systemName: "magnifyingglass",
+                        help: "搜索文件（⌘⇧F）",
+                        isDisabled: !model.canSearch
+                    ) {
+                        tabs.openSearch(scopeRoot: model.currentURL)
+                    }
+
                     ToolbarToggleButton(
                         systemName: "eye.fill",
                         help: tabs.showHiddenFiles ? "隐藏隐藏文件（⌘⇧.）" : "显示隐藏文件（⌘⇧.）",
@@ -1168,19 +1321,167 @@ private struct BrowserToolbar: View {
     }
 }
 
+private struct SearchResultsSurface: View {
+    @ObservedObject var model: FileBrowserViewModel
+    @Binding var renameItem: FileItem?
+    @Binding var renameText: String
+    @Binding var itemsPendingTrash: [FileItem]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SearchToolbar(model: model)
+            FileTableView(
+                renameItem: $renameItem,
+                renameText: $renameText,
+                itemsPendingTrash: $itemsPendingTrash
+            )
+            StatusBar()
+        }
+        .environmentObject(model)
+    }
+}
+
+private struct SearchToolbar: View {
+    @ObservedObject var model: FileBrowserViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+
+                FilterTextField(
+                    text: $model.searchQuery,
+                    placeholder: model.searchMode.placeholder,
+                    proxy: model.searchFocusProxy
+                )
+                .frame(minWidth: 180, idealWidth: 300, maxWidth: .infinity)
+
+                if !model.searchQuery.isEmpty {
+                    Button {
+                        model.searchQuery = ""
+                        model.focusSearchField()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .modernTooltip("清除搜索")
+                }
+            }
+            .font(.system(size: 13, weight: .medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+
+            Picker("范围", selection: $model.searchScope) {
+                ForEach(SearchScope.allCases) { scope in
+                    Text(scope.title).tag(scope)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 112)
+            .modernTooltip(model.searchScope.description)
+
+            Picker("匹配", selection: $model.searchMode) {
+                ForEach(SearchMatchMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 88)
+
+            ToolbarIconButton(systemName: "arrow.clockwise", help: "重新搜索") {
+                model.reload()
+            }
+
+            Spacer(minLength: 8)
+
+            SearchStatusView(model: model)
+        }
+        .padding(12)
+        .background(ThemedBarBackground())
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                model.focusSearchField()
+            }
+        }
+    }
+}
+
+private struct SearchStatusView: View {
+    @ObservedObject var model: FileBrowserViewModel
+
+    private var hasQuery: Bool {
+        !model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let error = model.searchErrorMessage {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else if model.isSearching {
+                ProgressView()
+                    .controlSize(.small)
+                Text("已扫描 \(model.searchScannedCount) 项")
+            } else if hasQuery {
+                Text("\(model.displayedItems.count) 项")
+                if model.searchSkippedCount > 0 {
+                    Text("跳过 \(model.searchSkippedCount) 个目录")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("按名称搜索当前文件夹或当前卷")
+            }
+        }
+        .font(.caption)
+        .monospacedDigit()
+        .foregroundStyle(.secondary)
+    }
+}
+
 private struct CopyQueueView: View {
     @ObservedObject var queue: CopyQueueViewModel
     @EnvironmentObject private var tabs: BrowserTabsViewModel
+    @State private var pendingRetryItem: CopyQueueItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("传输队列")
                     .font(.headline)
 
+                if queue.isPaused {
+                    Text("已暂停")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
                 Spacer()
 
-                Text("\(queue.activeCopyCount) 项正在进行")
+                if queue.failedCount > 0 {
+                    Button("重试失败项（\(queue.failedCount)）") {
+                        queue.retryAllFailed()
+                    }
+                    .controlSize(.small)
+                }
+
+                Button(queue.isPaused ? "继续" : "暂停") {
+                    if queue.isPaused {
+                        queue.resume()
+                    } else {
+                        queue.pause()
+                    }
+                }
+                .controlSize(.small)
+                .disabled(queue.isPaused ? !queue.canResume : !queue.canPause)
+
+                Text(queue.isPaused ? "\(queue.activeCopyCount) 项等待" : "\(queue.activeCopyCount) 项正在进行")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -1201,10 +1502,19 @@ private struct CopyQueueView: View {
                             ForEach(queue.items) { item in
                                 CopyQueueRow(
                                     item: item,
+                                    isPaused: queue.isPaused,
                                     onOpenDestination: {
                                         tabs.openOrSelectLocation(item.destinationURL.deletingLastPathComponent())
                                     },
-                                    onCancel: { queue.cancel(item.id) }
+                                    onCancel: { queue.cancel(item.id) },
+                                    onRetry: {
+                                        if queue.retryNeedsOverwrite(item.id) {
+                                            pendingRetryItem = item
+                                        } else {
+                                            queue.retry(item.id)
+                                        }
+                                    },
+                                    onDismiss: { queue.dismiss(item.id) }
                                 )
                                 .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
                             }
@@ -1222,6 +1532,26 @@ private struct CopyQueueView: View {
                 }
                 .listStyle(.plain)
             }
+        }
+        .confirmationDialog(
+            "目标位置已存在同名项目",
+            isPresented: Binding(
+                get: { pendingRetryItem != nil },
+                set: { if !$0 { pendingRetryItem = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("覆盖", role: .destructive) {
+                guard let pendingRetryItem else { return }
+                queue.retry(pendingRetryItem.id, shouldOverwrite: true)
+                self.pendingRetryItem = nil
+            }
+
+            Button("取消", role: .cancel) {
+                pendingRetryItem = nil
+            }
+        } message: {
+            Text("重试会用源文件覆盖目标位置的现有项目。")
         }
     }
 }
@@ -1262,8 +1592,11 @@ private struct CopyQueueHistoryRow: View {
 
 private struct CopyQueueRow: View {
     let item: CopyQueueItem
+    let isPaused: Bool
     let onOpenDestination: () -> Void
     let onCancel: () -> Void
+    let onRetry: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -1304,22 +1637,40 @@ private struct CopyQueueRow: View {
 
             Spacer(minLength: 8)
 
-            Button(action: onCancel) {
-                Image(systemName: "xmark")
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+            if item.state.canRetry {
+                HStack(spacing: 8) {
+                    Button("重试", action: onRetry)
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .modernTooltip("重新执行此传输")
+
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark")
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .modernTooltip("从队列中移除此记录")
+                }
+            } else {
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!item.state.isActive)
+                .foregroundStyle(item.state.isActive ? .secondary : .tertiary)
+                .modernTooltip("取消此传输任务")
             }
-            .buttonStyle(.plain)
-            .disabled(!item.state.isActive)
-            .foregroundStyle(item.state.isActive ? .secondary : .tertiary)
-            .modernTooltip("取消此传输任务")
         }
     }
 
     private var stateText: String {
         switch item.state {
         case .pending:
-            return "等待中"
+            return isPaused ? "已暂停" : "等待中"
         case .running:
             return item.operation == .move ? "正在移动" : "正在复制"
         case .completed:
@@ -1854,6 +2205,19 @@ private struct FileTableView: View {
                 }
                 .disabled(!canOpenWith(selection: selection))
 
+                Button("显示简介") {
+                    model.selectedItemIDs = selection
+                    model.showInfoSelected()
+                }
+                .keyboardShortcut("i", modifiers: .command)
+                .disabled(selectedItem(for: selection) == nil)
+
+                Button("复制副本") {
+                    model.selectedItemIDs = selection
+                    model.duplicateSelected()
+                }
+                .disabled(!hasLocalSelection(selection))
+
                 Divider()
 
                 Button("剪切") {
@@ -1869,6 +2233,38 @@ private struct FileTableView: View {
                 }
                 .keyboardShortcut("c", modifiers: .command)
                 .disabled(!canCut(selection: selection))
+
+                Button("复制到…") {
+                    model.selectedItemIDs = selection
+                    model.chooseDestination(for: .copy)
+                }
+                .disabled(!hasLocalSelection(selection))
+
+                Button("移动到…") {
+                    model.selectedItemIDs = selection
+                    model.chooseDestination(for: .move)
+                }
+                .disabled(!hasLocalSelection(selection))
+
+                Divider()
+
+                Button("压缩为 ZIP…") {
+                    model.selectedItemIDs = selection
+                    model.showCompressPanel(format: .zip)
+                }
+                .disabled(!canCompress(selection: selection))
+
+                Button("压缩为 TAR.GZ…") {
+                    model.selectedItemIDs = selection
+                    model.showCompressPanel(format: .tarGz)
+                }
+                .disabled(!canCompress(selection: selection))
+
+                Button("解压…") {
+                    model.selectedItemIDs = selection
+                    model.showExtractPanel()
+                }
+                .disabled(!canExtract(selection: selection))
 
                 Button("重命名") {
                     startRename(selection: selection)
@@ -1931,11 +2327,33 @@ private struct FileTableView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
             } else if model.displayedItems.isEmpty {
-                ContentUnavailableView(
-                    model.filterText.isEmpty ? "没有项目" : "没有匹配的项目",
-                    systemImage: model.filterText.isEmpty ? (model.isBrowsingNetwork ? "network.slash" : "folder") : "magnifyingglass",
-                    description: Text(emptyDescription)
-                )
+                if model.isSearchActive {
+                    if model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        ContentUnavailableView(
+                            "搜索文件",
+                            systemImage: "magnifyingglass",
+                            description: Text("输入关键词，按名称搜索当前文件夹或当前卷。")
+                        )
+                    } else if let error = model.searchErrorMessage {
+                        ContentUnavailableView(
+                            "搜索失败",
+                            systemImage: "exclamationmark.triangle",
+                            description: Text(error)
+                        )
+                    } else {
+                        ContentUnavailableView(
+                            "没有匹配的项目",
+                            systemImage: "magnifyingglass",
+                            description: Text("尝试其他关键词、范围或匹配方式。")
+                        )
+                    }
+                } else {
+                    ContentUnavailableView(
+                        model.filterText.isEmpty ? "没有项目" : "没有匹配的项目",
+                        systemImage: model.filterText.isEmpty ? (model.isBrowsingNetwork ? "network.slash" : "folder") : "magnifyingglass",
+                        description: Text(emptyDescription)
+                    )
+                }
             }
         }
     }
@@ -2013,6 +2431,27 @@ private struct FileTableView: View {
         selection.contains { id in
             model.items.first { $0.id == id }?.isNetworkLocation == false
         }
+    }
+
+    private func hasLocalSelection(_ selection: Set<FileItem.ID>) -> Bool {
+        canCut(selection: selection)
+    }
+
+    private func canCompress(selection: Set<FileItem.ID>) -> Bool {
+        let items = model.items.filter { selection.contains($0.id) && !$0.isNetworkLocation }
+        guard let firstParent = items.first?.url.deletingLastPathComponent() else {
+            return false
+        }
+        return items.allSatisfy { $0.url.deletingLastPathComponent() == firstParent }
+    }
+
+    private func canExtract(selection: Set<FileItem.ID>) -> Bool {
+        guard selection.count == 1,
+              let item = selectedItem(for: selection),
+              !item.isNetworkLocation else {
+            return false
+        }
+        return ArchiveService.isArchive(item.url)
     }
 
     private func canEdit(selection: Set<FileItem.ID>) -> Bool {
@@ -2401,6 +2840,489 @@ private nonisolated final class FileIconBox: @unchecked Sendable {
 
     init(_ icon: NSImage) {
         self.icon = icon
+    }
+}
+
+private struct RecoveryResidueSheet: View {
+    @ObservedObject var model: FileBrowserViewModel
+    @State private var confirmCleanup = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("发现未完成的传输残留")
+                    .font(.headline)
+                Spacer()
+                Button("关闭") {
+                    model.dismissRecoveryNotice()
+                }
+            }
+
+            Text("以下临时目录可能包含上一次传输尚未发布的数据。应用不会自动删除它们，请确认后保留或清理。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            List(model.recoveryResidues) { residue in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(residue.name)
+                        .font(.system(size: 13, weight: .medium))
+                    Text(residue.url.path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+                .padding(.vertical, 4)
+            }
+            .listStyle(.plain)
+
+            HStack {
+                Button("保留") {
+                    model.dismissRecoveryNotice()
+                }
+                Spacer()
+                Button("清理残留", role: .destructive) {
+                    confirmCleanup = true
+                }
+                .disabled(model.recoveryResidues.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 380)
+        .confirmationDialog(
+            "清理传输残留？",
+            isPresented: $confirmCleanup
+        ) {
+            Button("清理", role: .destructive) {
+                model.cleanUpRecoveryResidues()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("清理后这些临时目录及其中的数据将无法恢复。")
+        }
+    }
+}
+
+private struct UndoHistorySheet: View {
+    @ObservedObject var journal: FileUndoJournal
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("撤销历史")
+                    .font(.headline)
+                Spacer()
+                Button("关闭") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+
+            if journal.entries.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("本次运行还没有可撤销的操作。")
+                        .font(.system(size: 13))
+                    Text("重命名、移动和非覆盖复制完成后会出现在这里。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                List(journal.entries) { entry in
+                    UndoHistoryRow(entry: entry)
+                        .padding(.vertical, 3)
+                }
+                .listStyle(.plain)
+            }
+
+            Divider()
+
+            Text("撤销记录只保留本次运行期间最近 \(journal.limit) 次操作，退出 MaXplorer 后自动清空。覆盖操作无法撤销，会在列表中标注“不可撤销”。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(20)
+        .frame(width: 560, height: 420)
+        .onExitCommand {
+            dismiss()
+        }
+    }
+}
+
+private struct UndoHistoryRow: View {
+    let entry: FileUndoEntry
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: entry.isRestorable ? "arrow.uturn.backward.circle" : "exclamationmark.triangle")
+                .font(.system(size: 15))
+                .foregroundStyle(entry.isRestorable ? Color.accentColor : Color.secondary)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(entry.affectedCount > 1 ? "\(entry.title)（\(entry.affectedCount) 项）" : entry.title)
+                        .font(.system(size: 13, weight: .medium))
+                    if !entry.isRestorable {
+                        Text("不可撤销")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(entry.historyDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(entry.createdAt, format: .dateTime.hour().minute().second())
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("记录时间")
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct ArchiveProgressSheet: View {
+    @ObservedObject var model: FileBrowserViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(model.archiveOperationTitle)
+                .font(.headline)
+
+            if let error = model.archiveOperationError {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("请稍候…")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                Spacer()
+                if model.archiveOperationError == nil {
+                    Button("取消") {
+                        model.cancelArchiveOperation()
+                    }
+                } else {
+                    Button("关闭") {
+                        model.dismissArchiveOperation()
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .interactiveDismissDisabled(model.archiveOperationError == nil)
+    }
+}
+
+private struct TransferPlanSheet: View {
+    @ObservedObject var model: FileBrowserViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("传输计划")
+                .font(.headline)
+
+            if model.isPreparingTransferPlan || model.transferPlan == nil {
+                if let error = model.transferPlanError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("正在计算文件数、大小和目标空间…")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else if let plan = model.transferPlan {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    planRow("操作", plan.operation == .move ? "移动" : "复制")
+                    planRow("目标", plan.destinationDirectory.path)
+                    planRow("项目", "\(plan.itemCount) 项")
+                    planRow("总大小", byteText(plan.totalBytes))
+                    planRow("所需空间", plan.requiredBytes == 0 ? "不需要额外空间" : byteText(plan.requiredBytes))
+                    planRow("可用空间", plan.freeBytes.map(byteText) ?? "未知（网络卷）")
+                    planRow("冲突", plan.conflictCount == 0 ? "无" : "\(plan.conflictCount) 项")
+                    planRow("权限", permissionText(plan))
+                    if plan.isNetworkDestination {
+                        planRow("目标类型", "网络卷")
+                    }
+                }
+
+                if !plan.hasEnoughSpace {
+                    Label("目标空间不足，无法开始传输。", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                if !plan.destinationWritable {
+                    Label("目标文件夹不可写。", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                if plan.unreadableCount > 0 {
+                    Label("\(plan.unreadableCount) 个项目不可读，传输时可能失败。", systemImage: "exclamationmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") {
+                    model.cancelTransferPlan()
+                }
+                Button("开始传输") {
+                    model.confirmTransferPlan()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!(model.transferPlan?.canProceed ?? false))
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .interactiveDismissDisabled(model.isPreparingTransferPlan)
+    }
+
+    @ViewBuilder
+    private func planRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func permissionText(_ plan: TransferPlan) -> String {
+        if plan.unreadableCount > 0 {
+            return "\(plan.unreadableCount) 项不可读"
+        }
+        return plan.destinationWritable ? "正常" : "目标不可写"
+    }
+
+    private func byteText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+}
+
+private struct NewFileSheet: View {
+    let onCreate: (String) -> Void
+    let onCancel: () -> Void
+    @State private var name = ""
+    @FocusState private var isFocused: Bool
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("新建文件")
+                .font(.headline)
+
+            TextField("文件名", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 360)
+                .focused($isFocused)
+                .onSubmit(create)
+
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                Button("新建", action: create)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmedName.isEmpty)
+            }
+        }
+        .padding(20)
+        .onAppear {
+            isFocused = true
+        }
+    }
+
+    private func create() {
+        guard !trimmedName.isEmpty else { return }
+        onCreate(trimmedName)
+    }
+}
+
+private struct FileInfoSheet: View {
+    let item: FileItem
+    @ObservedObject var model: FileBrowserViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var copiedPath = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 44, height: 44)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.name)
+                        .font(.headline)
+                    Text(item.url.deletingLastPathComponent().path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+
+                Button("完成") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+
+            Divider()
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                infoRow("类型", item.displayKind)
+                infoRow("大小", sizeText)
+                infoRow("位置", item.url.deletingLastPathComponent().path)
+                infoRow("创建", dateText(model.infoDetails?.createdAt ?? item.createdAt))
+                infoRow("修改", dateText(model.infoDetails?.modifiedAt ?? item.modifiedAt))
+                infoRow("所有者", model.infoDetails?.owner ?? item.owner ?? "—")
+                infoRow("群组", model.infoDetails?.group ?? "—")
+                infoRow("权限", model.infoDetails?.permissions ?? "—")
+                infoRow("标签", tagText)
+            }
+
+            if let error = model.infoError {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Button(copiedPath ? "已复制" : "复制路径") {
+                    SystemActions.copyPath(item.url)
+                    copiedPath = true
+                }
+
+                Spacer()
+
+                Button("完成") {
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+    }
+
+    @ViewBuilder
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var sizeText: String {
+        if item.isDirectory {
+            if model.isInfoSizeLoading {
+                return "计算中…"
+            }
+            guard let size = model.infoFolderSize else {
+                return "—"
+            }
+            return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        }
+
+        guard let size = item.size else {
+            return "—"
+        }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    }
+
+    private func dateText(_ date: Date?) -> String {
+        date?.formatted(date: .abbreviated, time: .shortened) ?? "—"
+    }
+
+    private var tagText: String {
+        let tags = model.infoDetails?.tagNames ?? []
+        return tags.isEmpty ? "—" : tags.joined(separator: "，")
+    }
+}
+
+private struct SelectItemsSheet: View {
+    @Binding var pattern: String
+    @Binding var mode: SearchMatchMode
+    let onSelect: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var isFocused: Bool
+
+    private var trimmedPattern: String {
+        pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("选择匹配项")
+                .font(.headline)
+
+            Text("按文件名在当前列表中选中匹配项，不会改变当前文件夹内容。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField(mode.placeholder, text: $pattern)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isFocused)
+                    .onSubmit(onSelect)
+
+                Picker("匹配方式", selection: $mode) {
+                    ForEach(SearchMatchMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 90)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                Button("选择", action: onSelect)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmedPattern.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onAppear {
+            isFocused = true
+        }
     }
 }
 

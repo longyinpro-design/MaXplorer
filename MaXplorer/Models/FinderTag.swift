@@ -37,7 +37,40 @@ nonisolated enum FinderTagReader {
     static let maximumDisplayedColors = 3
 
     static func tagColors(for url: URL) -> [FinderTagColor] {
-        url.withUnsafeFileSystemRepresentation { path -> [FinderTagColor] in
+        colors(fromTags: tagStrings(for: url))
+    }
+
+    static func tagNames(for url: URL) -> [String] {
+        tagStrings(for: url).compactMap { tag in
+            tag.split(separator: "\n").first.map(String.init)
+        }
+    }
+
+    static func colors(fromPropertyList data: Data) -> [FinderTagColor] {
+        colors(fromTags: tagStrings(fromPropertyList: data))
+    }
+
+    private static func colors(fromTags tags: [String]) -> [FinderTagColor] {
+        var colors: [FinderTagColor] = []
+        for tag in tags {
+            guard
+                let colorNumber = tag.split(separator: "\n").last.flatMap({ Int($0) }),
+                let color = FinderTagColor(rawValue: colorNumber),
+                !colors.contains(color)
+            else {
+                continue
+            }
+
+            colors.append(color)
+            if colors.count == maximumDisplayedColors {
+                break
+            }
+        }
+        return colors
+    }
+
+    private static func tagStrings(for url: URL) -> [String] {
+        url.withUnsafeFileSystemRepresentation { path -> [String] in
             guard let path else {
                 return []
             }
@@ -55,31 +88,12 @@ nonisolated enum FinderTagReader {
                 return []
             }
 
-            return colors(fromPropertyList: data.prefix(bytesRead))
+            return tagStrings(fromPropertyList: data.prefix(bytesRead))
         }
     }
 
-    static func colors(fromPropertyList data: Data) -> [FinderTagColor] {
-        guard let tags = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String] else {
-            return []
-        }
-
-        var colors: [FinderTagColor] = []
-        for tag in tags {
-            guard
-                let colorNumber = tag.split(separator: "\n").last.flatMap({ Int($0) }),
-                let color = FinderTagColor(rawValue: colorNumber),
-                !colors.contains(color)
-            else {
-                continue
-            }
-
-            colors.append(color)
-            if colors.count == maximumDisplayedColors {
-                break
-            }
-        }
-        return colors
+    private static func tagStrings(fromPropertyList data: Data) -> [String] {
+        (try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String]) ?? []
     }
 }
 

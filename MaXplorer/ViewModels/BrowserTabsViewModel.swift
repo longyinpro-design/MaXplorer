@@ -33,23 +33,28 @@ final class BrowserTabsViewModel: ObservableObject {
     private let fileClipboard: FileClipboard
     private let favoritesStore: FavoritesStore
     private let copyQueue: CopyQueueViewModel
+    let undoJournal: FileUndoJournal
 
     init(maximumConcurrentTabs: Int = 20) {
         let fileClipboard = FileClipboard()
         let favoritesStore = FavoritesStore()
         let copyQueue = CopyQueueViewModel()
+        let undoJournal = FileUndoJournal()
         let initialTab = Self.makeTab(
             fileClipboard: fileClipboard,
             favoritesStore: favoritesStore,
-            copyQueue: copyQueue
+            copyQueue: copyQueue,
+            undoJournal: undoJournal
         )
         self.fileClipboard = fileClipboard
         self.favoritesStore = favoritesStore
         self.copyQueue = copyQueue
+        self.undoJournal = undoJournal
         self.tabs = [initialTab]
         self.selectedTabID = initialTab.id
         self.maximumConcurrentTabs = Self.clampedTabLimit(maximumConcurrentTabs)
         observeActiveModel()
+        initialTab.model.scanForRecoveryResidues()
     }
 
     private func observeActiveModel() {
@@ -113,8 +118,7 @@ final class BrowserTabsViewModel: ObservableObject {
     func openOrSelectLocation(_ url: URL) {
         let location = url.standardizedFileURL
         if let existingTab = tabs.first(where: {
-            $0.id != spaceAnalyzerTabID &&
-            $0.id != copyQueueTabID &&
+            !isSpecialTab($0.id) &&
             $0.model.currentURL.standardizedFileURL == location
         }) {
             selectedTabID = existingTab.id
@@ -125,7 +129,7 @@ final class BrowserTabsViewModel: ObservableObject {
         if canAddTab {
             openLocationInNewTab(location)
         } else if let browserTab = tabs.first(where: {
-            $0.id != spaceAnalyzerTabID && $0.id != copyQueueTabID
+            !isSpecialTab($0.id)
         }) {
             selectedTabID = browserTab.id
             browserTab.model.navigate(to: location)
@@ -190,14 +194,13 @@ final class BrowserTabsViewModel: ObservableObject {
         }
 
         selectedTabID = tabID
-        if tabID != spaceAnalyzerTabID, tabID != copyQueueTabID {
+        if !isSpecialTab(tabID) {
             activeModel.showCurrentFolder()
         }
     }
 
     func canPasteItems(to tabID: BrowserTab.ID) -> Bool {
-        guard tabID != spaceAnalyzerTabID,
-              tabID != copyQueueTabID,
+        guard !isSpecialTab(tabID),
               let tab = tabs.first(where: { $0.id == tabID }) else {
             return false
         }
@@ -219,6 +222,11 @@ final class BrowserTabsViewModel: ObservableObject {
             return
         }
 
+        if tabID == searchTabID {
+            tabs[index].model.endSearch()
+            searchTabID = nil
+        }
+
         let wasSelected = selectedTabID == tabID
         tabs.remove(at: index)
 
@@ -232,10 +240,8 @@ final class BrowserTabsViewModel: ObservableObject {
     /// tab strip's drag-to-reorder).
     func moveTab(_ tabID: BrowserTab.ID, before targetID: BrowserTab.ID) {
         guard tabID != targetID,
-              tabID != spaceAnalyzerTabID,
-              tabID != copyQueueTabID,
-              targetID != spaceAnalyzerTabID,
-              targetID != copyQueueTabID,
+              !isSpecialTab(tabID),
+              !isSpecialTab(targetID),
               let fromIndex = tabs.firstIndex(where: { $0.id == tabID }),
               let targetIndex = tabs.firstIndex(where: { $0.id == targetID }) else {
             return
@@ -248,8 +254,7 @@ final class BrowserTabsViewModel: ObservableObject {
 
     func duplicateTab(_ tabID: BrowserTab.ID) {
         guard canAddTab,
-              tabID != spaceAnalyzerTabID,
-              tabID != copyQueueTabID,
+              !isSpecialTab(tabID),
               let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         let source = tabs[index]
         let tab = makeTab()
@@ -262,7 +267,7 @@ final class BrowserTabsViewModel: ObservableObject {
     }
 
     func sortTabsByName() {
-        let specialIDs = [spaceAnalyzerTabID, copyQueueTabID].compactMap { $0 }
+        let specialIDs = [spaceAnalyzerTabID, copyQueueTabID, searchTabID].compactMap { $0 }
         let specialTabs = specialIDs.compactMap { id in tabs.first { $0.id == id } }
         let browserTabs = tabs.filter { !specialIDs.contains($0.id) }.sorted { lhs, rhs in
             lhs.model.tabTitle.localizedStandardCompare(rhs.model.tabTitle) == .orderedAscending
@@ -276,7 +281,7 @@ final class BrowserTabsViewModel: ObservableObject {
         var survivors: [BrowserTab] = []
 
         for tab in tabs {
-            if tab.id == spaceAnalyzerTabID || tab.id == copyQueueTabID {
+            if isSpecialTab(tab.id) {
                 survivors.append(tab)
                 continue
             }
@@ -336,6 +341,44 @@ final class BrowserTabsViewModel: ObservableObject {
         closeTab(id)
     }
 
+    // MARK: – Search
+
+    @Published private(set) var searchTabID: UUID?
+
+    var isSearchActive: Bool { selectedTabID == searchTabID }
+
+    var searchModel: FileBrowserViewModel? {
+        guard let searchTabID else { return nil }
+        return tabs.first(where: { $0.id == searchTabID })?.model
+    }
+
+    func openSearch(scopeRoot: URL, query: String = "") {
+        guard scopeRoot.isFileURL else { return }
+
+        if let existingID = searchTabID,
+           let existingTab = tabs.first(where: { $0.id == existingID }) {
+            selectedTabID = existingID
+            existingTab.model.beginSearch(scopeRoot: scopeRoot, query: query)
+            return
+        }
+
+        guard canAddTab else { return }
+
+        let tab = makeTab()
+        tab.model.setListingOptions(listingOptions)
+        tab.model.showHiddenFiles = showHiddenFiles
+        tab.model.showAliases = showAliases
+        tabs.insert(tab, at: 0)
+        searchTabID = tab.id
+        selectedTabID = tab.id
+        tab.model.beginSearch(scopeRoot: scopeRoot, query: query)
+    }
+
+    func closeSearch() {
+        guard let searchTabID else { return }
+        closeTab(searchTabID)
+    }
+
     func selectNextTab() {
         selectTab(offset: 1)
     }
@@ -357,13 +400,19 @@ final class BrowserTabsViewModel: ObservableObject {
     }
 
     private func makeTab() -> BrowserTab {
-        Self.makeTab(fileClipboard: fileClipboard, favoritesStore: favoritesStore, copyQueue: copyQueue)
+        Self.makeTab(
+            fileClipboard: fileClipboard,
+            favoritesStore: favoritesStore,
+            copyQueue: copyQueue,
+            undoJournal: undoJournal
+        )
     }
 
     static func makeTab(
         fileClipboard: FileClipboard,
         favoritesStore: FavoritesStore,
-        copyQueue: CopyQueueViewModel
+        copyQueue: CopyQueueViewModel,
+        undoJournal: FileUndoJournal
     ) -> BrowserTab {
         BrowserTab(
             id: UUID(),
@@ -371,13 +420,14 @@ final class BrowserTabsViewModel: ObservableObject {
                 fileSystem: LocalFileSystemService(),
                 fileClipboard: fileClipboard,
                 favoritesStore: favoritesStore,
-                copyQueue: copyQueue
+                copyQueue: copyQueue,
+                undoJournal: undoJournal
             )
         )
     }
 
     private func selectBrowserTabForSidebarAction() -> Bool {
-        guard isSpaceAnalyzerActive || isCopyQueueActive else {
+        guard isSpaceAnalyzerActive || isCopyQueueActive || isSearchActive else {
             return true
         }
 
@@ -390,18 +440,23 @@ final class BrowserTabsViewModel: ObservableObject {
     }
 
     private func selectExistingBrowserTabForSidebarSurface() -> Bool {
-        guard isSpaceAnalyzerActive || isCopyQueueActive else {
+        guard isSpaceAnalyzerActive || isCopyQueueActive || isSearchActive else {
             return true
         }
 
         guard let browserTab = tabs.first(where: {
-            $0.id != spaceAnalyzerTabID && $0.id != copyQueueTabID
+            !isSpecialTab($0.id)
         }) else {
             return false
         }
 
         selectedTabID = browserTab.id
         return true
+    }
+
+    private func isSpecialTab(_ id: UUID?) -> Bool {
+        guard let id else { return false }
+        return id == spaceAnalyzerTabID || id == copyQueueTabID || id == searchTabID
     }
 
     private static func clampedTabLimit(_ value: Int) -> Int {

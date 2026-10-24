@@ -86,3 +86,39 @@ The reproducible entrypoint is `script/build_and_run.sh`, also wired to the Code
 ```
 
 A compact local proof copy, including byte-level UI checks and the build log, is retained at `/Users/long/Code/文件管理器/research/2026-10-22/safety-stage/receipts/app-ui-validation.json`.
+
+## v1.11 hardening update (2026-10-24)
+
+The safety engine now covers the network/non-APFS cases that were previously listed as unaccepted.
+
+- **Volume capability probe:** `RENAME_SWAP` support is probed once per mount and cached. Unsupported volumes use a backup-based publish path instead of failing the overwrite.
+- **Backup fallback:** the old destination is renamed to a private `.maxplorer-backup-*` name, the staged payload is published with `RENAME_EXCL`, and the backup is removed after the operation. If publishing fails, the old destination is renamed back. If rollback also fails, the failure reports the backup path instead of deleting data.
+- **ENOSPC:** staging copies check the destination free space before copying and report required/available bytes without modifying the old destination or source.
+- **Disconnect:** `ENOTCONN`, `ETIMEDOUT`, and `EHOSTDOWN` are reported as connection interruptions; the old destination and source remain unchanged and the queue can retry.
+- **Recovery residue:** on launch the app scans Home, the last transfer destination, and the current folder for `.maxplorer-transfer-*`, `.maxplorer-backup-*`, and `.maxplorer-probe-*`. Residue is only reported; deletion requires explicit user action, and symlinks are never followed during cleanup.
+- **Root ancestor fix:** `hasAncestor` now stops at `/` using standardized paths. Previously macOS could turn `/` into `/../` during the walk, causing unbounded parent traversal and `ENAMETOOLONG` on overwrite.
+
+### Verification (2026-10-24)
+
+| Scenario | Command | Result |
+| --- | --- | --- |
+| Same-volume suite incl. forced swap fallback and recovery scanner | `scripts/test-file-operations.sh` | 85 PASS / 0 FAIL |
+| Low-space cross-volume (24 MB HFS+ image, 32 MB source) | `scripts/test-file-operations.sh --low-space` | 89 PASS / 0 FAIL, includes ENOSPC preservation |
+| ExFAT image creation | `scripts/test-file-operations.sh --exfat` | NOT RUN: this host refused ExFAT formatting (`hdiutil create -fs ExFAT` fails with “operation not allowed”), so exFAT coverage is `NOT_PROVEN` here |
+| SMB share overwrite/disconnect | manual | NOT RUN: no SMB share available in this environment; manual matrix still required |
+
+The forced-fallback tests (`SafeFileOperations.setForcedSwapFallbackForTesting(true)`) exercise the SMB/exFAT publish path deterministically on APFS, including file overwrite, directory overwrite, backup cleanup, and missing-source preservation.
+
+## v1.11 undo journal update (2026-10-24)
+
+`⌘Z` and Edit → “撤销” now revert the most recent rename, move, or non-overwriting copy. The history lives in memory (`FileUndoJournal`, last 20 operations) and is discarded when the app quits; Edit → “撤销历史…” shows the entries and states that they are cleared on exit.
+
+- **Batch aggregation:** every paste, duplicate, or move is enqueued with one `batchID`. `FileBrowserViewModel` accumulates the finished destinations in `UndoBatchAccumulator` and records a single undo entry once no item of that batch is pending or running, so one `⌘Z` reverts the whole batch.
+- **Verification before undo:** each entry stores `UndoItemState` fingerprints (mode, size, modification time with nanoseconds, inode; directories hash their whole subtree). Before reverting, the current state must still match the stored state and the original location must be free. Anything that changed is reported instead of touched.
+- **Partial batches:** items that cannot be reverted stay in the journal as a partial entry with the same `id`, so a later `⌘Z` retries only the remaining items; the alert lists the reason for each failure.
+- **Copies are removed through the Trash** and only while unchanged. Moves and renames are reverted through `SafeFileOperations` (staged publish with rollback), not with raw `FileManager` calls.
+- **Overwrites are not undoable:** the replaced content is gone, so an overwrite records a `notRestorable` history marker instead of an undo entry (one marker per batch, “N 个项目被覆盖”). `nextUndoableEntry` skips markers, so the menu never offers a “fake undo”.
+
+### Verification (V11-06, 2026-10-24)
+
+`scripts/test-file-operations.sh` → **85 PASS / 0 FAIL**, including rename undo, move undo, batch move undo, batch partial failure, copy undo, modified-copy refusal, batch copy partial failure, occupied-original-location refusal, overwrite-marker refusal, the 20-entry history limit with newest-first ordering, marker skipping for the next undo, in-place replacement of partially undone entries, and batch accumulator grouping. `xcodebuild -project MaXplorer.xcodeproj -scheme MaXplorer build` succeeds.
