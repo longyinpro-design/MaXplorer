@@ -1,5 +1,15 @@
 # Change Log
 
+## 2026-10-24 — v1.11
+
+- Added recursive filename search for the current folder or volume, with substring and wildcard masks, live progress, cancellation, and a Search & Select command that highlights matches in the browser without changing the listing.
+- Added Duplicate, Get Info, New File, Copy To and Move To, all routed through the transactional file operations stack.
+- Added ZIP and TAR.GZ compression plus extraction of zip, tar, gz, bz2 and their tar variants into a new folder, with progress and error reporting.
+- Added a transfer plan preview before moves and copies that reports space requirements, naming conflicts and permission problems before anything is written.
+- Added pause, resume, retry and retry-all to the copy queue, including per-item progress and cancellation that leaves existing destinations intact.
+- Added an undo journal for renames, moves and non-overwriting copies: ⌘Z restores the last operation, a whole batch undoes as one step, undo is refused when the files changed or the original location is occupied, copies are removed through the Trash, and overwriting operations are marked as not undoable instead of pretending. Edit → Undo History lists the last 20 operations and explains that history is cleared when MaXplorer quits.
+- Hardened moves and copies on SMB, exFAT and space-constrained volumes with volume capability probing, ENOSPC preflight, disconnection handling and a startup scan for leftover staging and backup files.
+
 ## 2026-10-23 — v1.10
 
 - Localized the interface into Simplified Chinese, including menus, settings, Space Analyzer, Copy Queue, and preview windows.
