@@ -13,13 +13,6 @@ enum DetailDestination: Equatable {
     case settings
 }
 
-struct CopyConflictRequest: Identifiable, Equatable {
-    let id = UUID()
-    let conflictingName: String
-    let conflictNumber: Int
-    let totalConflicts: Int
-}
-
 struct ArchiveConflictRequest: Identifiable, Equatable {
     let id = UUID()
     let archiveName: String
@@ -193,6 +186,8 @@ final class FileBrowserViewModel: ObservableObject {
     private var listingOptions = DirectoryListingOptions(columns: FileColumn.defaultVisible)
     private var conflictSession: ConflictSession?
     private var conflictPreparationGeneration = 0
+    private var conflictTask: Task<Void, Never>?
+    private var conflictApplyToAll: CopyConflictResolution?
     private var folderMonitor: DispatchSourceFileSystemObject?
     private var monitorReloadTask: Task<Void, Never>?
     private var clipboardObservation: AnyCancellable?
@@ -234,14 +229,10 @@ final class FileBrowserViewModel: ObservableObject {
         let allSources: [URL]
         let destinationDirectory: URL
         let operation: Operation
-        var approvedItems: [(source: URL, shouldOverwrite: Bool)]
-        var remainingConflictIndices: [Int]
+        var approvedItems: [ResolvedTransferItem]
+        var conflicts: [TransferConflictCandidate]
         let totalConflicts: Int
-    }
-
-    private struct ConflictPreflightResult: Sendable {
-        let approvedSources: [URL]
-        let conflictIndices: [Int]
+        let queueReservations: Set<URL>
     }
 
     private struct PendingTransfer {
@@ -345,6 +336,7 @@ final class FileBrowserViewModel: ObservableObject {
         infoTask?.cancel()
         duplicateTask?.cancel()
         transferPlanTask?.cancel()
+        conflictTask?.cancel()
         archiveOperationTask?.cancel()
         undoJournalObservation?.cancel()
         volumeStatsRefreshTask?.cancel()
@@ -2030,33 +2022,84 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func resolveCopyConflict(_ resolution: CopyConflictResolution) {
-        guard var session = conflictSession else { return }
-        copyConflictRequest = nil
-
-        switch resolution {
-        case .cancel:
+        if resolution == .cancel {
+            conflictPreparationGeneration += 1
+            conflictTask?.cancel()
+            conflictTask = nil
             conflictSession = nil
+            conflictApplyToAll = nil
+            copyConflictRequest = nil
             return
-        case .overwrite:
-            if let idx = session.remainingConflictIndices.first {
-                session.approvedItems.append((session.allSources[idx], true))
-                session.remainingConflictIndices.removeFirst()
-            }
-        case .overwriteAll:
-            for idx in session.remainingConflictIndices {
-                session.approvedItems.append((session.allSources[idx], true))
-            }
-            session.remainingConflictIndices = []
-        case .skip:
-            if !session.remainingConflictIndices.isEmpty {
-                session.remainingConflictIndices.removeFirst()
-            }
-        case .skipAll:
-            session.remainingConflictIndices = []
         }
-
+        guard let request = copyConflictRequest, !request.isPreparing,
+              var session = conflictSession, let candidate = session.conflicts.first else { return }
+        switch resolution {
+        case .skipAll:
+            session.conflicts = []
+        case .skip:
+            session.conflicts.removeFirst()
+        case .overwrite, .overwriteAll:
+            guard !candidate.isReserved, let comparison = request.comparison, request.errorMessage == nil else { return }
+            session.approvedItems.append(ResolvedTransferItem(
+                source: candidate.source, destination: candidate.destination,
+                shouldOverwrite: true, approval: comparison.approval
+            ))
+            session.conflicts.removeFirst()
+            if resolution == .overwriteAll { conflictApplyToAll = .overwriteAll }
+        case .keepBoth, .keepBothAll:
+            if resolution == .keepBothAll { conflictApplyToAll = .keepBothAll }
+            prepareKeepBoth(candidate, session: session)
+            return
+        case .cancel: return
+        }
         conflictSession = session
         showNextConflictOrExecute()
+    }
+
+    func refreshCopyConflictComparison() {
+        conflictApplyToAll = nil
+        showNextConflictOrExecute()
+    }
+
+    private func prepareKeepBoth(_ candidate: TransferConflictCandidate, session: ConflictSession) {
+        let generation = conflictPreparationGeneration
+        let requestID = copyConflictRequest?.id
+        copyConflictRequest?.isPreparing = true
+        copyConflictRequest?.errorMessage = nil
+        let reserved = session.queueReservations.union(session.approvedItems.map(\.destination))
+            .union(session.conflicts.map(\.destination))
+        conflictTask?.cancel()
+        conflictTask = Task { [weak self] in
+            do {
+                let worker = Task.detached(priority: .utility) {
+                    try TransferConflictPlanner.keepBoth(for: candidate.source, in: session.destinationDirectory, reserved: reserved)
+                }
+                let item = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+                guard !Task.isCancelled, let self, generation == self.conflictPreparationGeneration,
+                      self.copyConflictRequest?.id == requestID else { return }
+                guard self.copyQueue.reservedDestinationURLs == session.queueReservations else {
+                    self.cancelChangedConflictQueue()
+                    return
+                }
+                var updated = session
+                updated.approvedItems.append(item)
+                updated.conflicts.removeFirst()
+                self.conflictSession = updated
+                self.showNextConflictOrExecute()
+            } catch is CancellationError {
+            } catch {
+                guard let self, generation == self.conflictPreparationGeneration,
+                      self.copyConflictRequest?.id == requestID else { return }
+                self.conflictApplyToAll = nil
+                self.copyConflictRequest?.isPreparing = false
+                self.copyConflictRequest?.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelChangedConflictQueue() {
+        resolveCopyConflict(.cancel)
+        errorMessage = "传输队列的目标预留已变化。未加入本批任务，请重新发起传输并确认冲突。"
     }
 
     /// Copies items dropped from Finder or another tab into this folder. Reuses
@@ -2071,9 +2114,7 @@ final class FileBrowserViewModel: ObservableObject {
 
     private func beginConflictResolution(sources: [URL], to destinationDirectory: URL, operation: ConflictSession.Operation) {
         cancelTransferPlan()
-        conflictPreparationGeneration += 1
-        conflictSession = nil
-        copyConflictRequest = nil
+        resolveCopyConflict(.cancel)
         let generation = transferPlanGeneration
         transferPlanTask = Task { [weak self] in
             let worker = Task.detached(priority: .utility) {
@@ -2093,28 +2134,31 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func startConflictResolution(sources: [URL], to destinationDirectory: URL, operation: ConflictSession.Operation) {
-        conflictPreparationGeneration += 1
+        resolveCopyConflict(.cancel)
         let generation = conflictPreparationGeneration
-
-        Task { [weak self] in
-            let preflight = await Task.detached(priority: .utility) {
-                Self.preflightConflicts(sources: sources, destinationDirectory: destinationDirectory)
-            }.value
-
-            guard let self, generation == self.conflictPreparationGeneration else {
-                return
+        let reservations = copyQueue.reservedDestinationURLs
+        conflictTask = Task { [weak self] in
+            do {
+                let worker = Task.detached(priority: .utility) {
+                    try TransferConflictPlanner.preflight(sources: sources, destinationDirectory: destinationDirectory, reserved: reservations)
+                }
+                let preflight = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+                guard !Task.isCancelled, let self, generation == self.conflictPreparationGeneration else { return }
+                guard reservations == self.copyQueue.reservedDestinationURLs else {
+                    self.cancelChangedConflictQueue()
+                    return
+                }
+                self.conflictSession = ConflictSession(
+                    allSources: sources, destinationDirectory: destinationDirectory, operation: operation,
+                    approvedItems: preflight.approvedItems, conflicts: preflight.conflicts,
+                    totalConflicts: preflight.conflicts.count, queueReservations: reservations
+                )
+                self.showNextConflictOrExecute()
+            } catch is CancellationError {
+            } catch {
+                guard let self, generation == self.conflictPreparationGeneration else { return }
+                self.errorMessage = error.localizedDescription
             }
-
-            self.conflictSession = ConflictSession(
-                allSources: sources,
-                destinationDirectory: destinationDirectory,
-                operation: operation,
-                approvedItems: preflight.approvedSources.map { ($0, false) },
-                remainingConflictIndices: preflight.conflictIndices,
-                totalConflicts: preflight.conflictIndices.count
-            )
-
-            self.showNextConflictOrExecute()
         }
     }
 
@@ -2214,58 +2258,65 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
-    nonisolated private static func preflightConflicts(
-        sources: [URL],
-        destinationDirectory: URL
-    ) -> ConflictPreflightResult {
-        var approvedSources: [URL] = []
-        var conflictIndices: [Int] = []
-        approvedSources.reserveCapacity(sources.count)
-
-        for (index, source) in sources.enumerated() {
-            let destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
-            if SafeFileOperations.entryExists(at: destination) {
-                conflictIndices.append(index)
-            } else {
-                approvedSources.append(source)
-            }
-        }
-
-        return ConflictPreflightResult(
-            approvedSources: approvedSources,
-            conflictIndices: conflictIndices
-        )
-    }
-
     private func showNextConflictOrExecute() {
         guard let session = conflictSession else { return }
-
-        guard let firstRemainingIdx = session.remainingConflictIndices.first else {
+        guard let candidate = session.conflicts.first else {
             copyConflictRequest = nil
             executeConflictSession()
             return
         }
-
-        let conflictNumber = session.totalConflicts - session.remainingConflictIndices.count + 1
-        copyConflictRequest = CopyConflictRequest(
-            conflictingName: session.allSources[firstRemainingIdx].lastPathComponent,
-            conflictNumber: conflictNumber,
+        let request = CopyConflictRequest(
+            candidate: candidate,
+            conflictNumber: session.totalConflicts - session.conflicts.count + 1,
             totalConflicts: session.totalConflicts
         )
+        copyConflictRequest = request
+        if conflictApplyToAll == .keepBothAll {
+            prepareKeepBoth(candidate, session: session)
+            return
+        }
+        if candidate.isReserved {
+            copyConflictRequest?.isPreparing = false
+            conflictApplyToAll = nil
+            return
+        }
+        let generation = conflictPreparationGeneration
+        conflictTask = Task { [weak self] in
+            do {
+                let comparison = try await SafeFileOperations.captureConflictComparison(
+                    sourceURL: candidate.source, destinationURL: candidate.destination
+                )
+                guard !Task.isCancelled, let self, generation == self.conflictPreparationGeneration,
+                      self.copyConflictRequest?.id == request.id else { return }
+                self.copyConflictRequest?.comparison = comparison
+                self.copyConflictRequest?.isPreparing = false
+                if self.conflictApplyToAll == .overwriteAll { self.resolveCopyConflict(.overwriteAll) }
+            } catch is CancellationError {
+            } catch {
+                guard let self, generation == self.conflictPreparationGeneration,
+                      self.copyConflictRequest?.id == request.id else { return }
+                self.conflictApplyToAll = nil
+                self.copyConflictRequest?.isPreparing = false
+                self.copyConflictRequest?.errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func executeConflictSession() {
         guard let session = conflictSession else { return }
+        guard copyQueue.reservedDestinationURLs == session.queueReservations else {
+            cancelChangedConflictQueue()
+            return
+        }
         conflictSession = nil
+        conflictApplyToAll = nil
         guard !session.approvedItems.isEmpty else { return }
-
         switch session.operation {
         case .copy(let maximumConcurrentCopies):
             copyQueue.maximumConcurrentCopies = maximumConcurrentCopies
-            copyQueue.enqueue(session.approvedItems, to: session.destinationDirectory)
-
+            copyQueue.enqueueResolved(session.approvedItems, operation: .copy)
         case .move:
-            copyQueue.enqueueMoves(session.approvedItems, to: session.destinationDirectory)
+            copyQueue.enqueueResolved(session.approvedItems, operation: .move)
         }
     }
 

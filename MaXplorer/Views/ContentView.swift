@@ -216,39 +216,14 @@ private struct ActiveBrowserView: View {
             manualFolderPath = model.currentURL.isFileURL ? model.currentURL.path : ""
             manualFolderError = nil
         }
-        .confirmationDialog(
-            copyConflictTitle,
-            isPresented: Binding(
-                get: { model.copyConflictRequest != nil },
-                set: { if !$0 { model.copyConflictRequest = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("覆盖", role: .destructive) {
-                model.resolveCopyConflict(.overwrite)
+        .sheet(isPresented: Binding(
+            get: { model.copyConflictRequest != nil },
+            set: { if !$0 { model.resolveCopyConflict(.cancel) } }
+        )) {
+            if let request = model.copyConflictRequest {
+                TransferConflictPanel(request: request, onResolve: model.resolveCopyConflict,
+                                      onRefresh: model.refreshCopyConflictComparison)
             }
-
-            if model.copyConflictRequest?.totalConflicts ?? 0 > 1 {
-                Button("全部覆盖", role: .destructive) {
-                    model.resolveCopyConflict(.overwriteAll)
-                }
-            }
-
-            Button("跳过") {
-                model.resolveCopyConflict(.skip)
-            }
-
-            if model.copyConflictRequest?.totalConflicts ?? 0 > 1 {
-                Button("全部跳过") {
-                    model.resolveCopyConflict(.skipAll)
-                }
-            }
-
-            Button("取消", role: .cancel) {
-                model.resolveCopyConflict(.cancel)
-            }
-        } message: {
-            Text(copyConflictMessage)
         }
         .onAppear {
             model.copyQueue.maximumConcurrentCopies = settings.maximumConcurrentCopiedFiles
@@ -385,18 +360,7 @@ private struct ActiveBrowserView: View {
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 300, alignment: .leading)
     }
 
-    private var copyConflictTitle: String {
-        guard let request = model.copyConflictRequest else { return "" }
-        return "目标位置已存在“\(request.conflictingName)”"
-    }
 
-    private var copyConflictMessage: String {
-        guard let request = model.copyConflictRequest else { return "" }
-        if request.totalConflicts > 1 {
-            return "第 \(request.conflictNumber) 个冲突，共 \(request.totalConflicts) 个"
-        }
-        return "已存在同名项目，请选择处理方式。"
-    }
 }
 
 private struct BrowserTabStrip: View {
@@ -1565,11 +1529,7 @@ private struct CopyQueueView: View {
                                     },
                                     onCancel: { queue.cancel(item.id) },
                                     onRetry: {
-                                        if queue.retryNeedsOverwrite(item.id) {
-                                            pendingRetryItem = item
-                                        } else {
-                                            queue.retry(item.id)
-                                        }
+                                        pendingRetryItem = item
                                     },
                                     onDismiss: { queue.dismiss(item.id) }
                                 )
@@ -1590,25 +1550,8 @@ private struct CopyQueueView: View {
                 .listStyle(.plain)
             }
         }
-        .confirmationDialog(
-            "目标位置已存在同名项目",
-            isPresented: Binding(
-                get: { pendingRetryItem != nil },
-                set: { if !$0 { pendingRetryItem = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("覆盖", role: .destructive) {
-                guard let pendingRetryItem else { return }
-                queue.retry(pendingRetryItem.id, shouldOverwrite: true)
-                self.pendingRetryItem = nil
-            }
-
-            Button("取消", role: .cancel) {
-                pendingRetryItem = nil
-            }
-        } message: {
-            Text("重试会用源文件覆盖目标位置的现有项目。")
+        .sheet(item: $pendingRetryItem) { item in
+            CopyRetryConflictSheet(queue: queue, item: item) { pendingRetryItem = nil }
         }
     }
 }

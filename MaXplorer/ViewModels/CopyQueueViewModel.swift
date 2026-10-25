@@ -5,6 +5,8 @@ import Darwin
 enum CopyConflictResolution {
     case overwrite
     case overwriteAll
+    case keepBoth
+    case keepBothAll
     case skip
     case skipAll
     case cancel
@@ -47,9 +49,10 @@ struct CopyQueueItem: Identifiable, Equatable {
     /// restore the whole batch with a single ⌘Z.
     let batchID: UUID
     let sourceURL: URL
-    let destinationURL: URL
-    let name: String
+    var destinationURL: URL
+    var name: String
     var shouldOverwrite: Bool
+    var approval: SafeFileOperations.ConflictApproval? = nil
     let operation: CopyQueueOperation
     var state: CopyQueueItemState
     var totalBytes: Int64
@@ -117,6 +120,10 @@ final class CopyQueueViewModel: ObservableObject {
     private var tasks: [CopyQueueItem.ID: Task<Void, Never>] = [:]
     private var aggregateTotalItemCount = 0
     private var aggregateFinishedItemCount = 0
+
+    var reservedDestinationURLs: Set<URL> {
+        Set(items.filter { $0.state.isActive }.map(\.destinationURL))
+    }
 
     var hasItems: Bool {
         !items.isEmpty
@@ -285,6 +292,22 @@ final class CopyQueueViewModel: ObservableObject {
         startAvailableCopies()
     }
 
+    func enqueueResolved(_ resolvedItems: [ResolvedTransferItem], operation: CopyQueueOperation) {
+        let batchID = UUID()
+        let newItems = resolvedItems.map { item in
+            CopyQueueItem(
+                id: UUID(), batchID: batchID,
+                sourceURL: item.source.standardizedFileURL, destinationURL: item.destination.standardizedFileURL,
+                name: item.destination.lastPathComponent, shouldOverwrite: item.shouldOverwrite,
+                approval: item.approval, operation: operation, state: .pending,
+                totalBytes: 0, copiedBytes: 0, bytesPerSecond: 0, startedAt: nil
+            )
+        }
+        guard !newItems.isEmpty else { return }
+        appendToQueue(newItems)
+        startAvailableCopies()
+    }
+
     func enqueueDuplicates(_ items: [(source: URL, destination: URL)]) {
         let batchID = UUID()
         let newItems = items.map { sourceURL, destinationURL -> CopyQueueItem in
@@ -336,7 +359,7 @@ final class CopyQueueViewModel: ObservableObject {
         startAvailableCopies()
     }
 
-    func retry(_ itemID: CopyQueueItem.ID, shouldOverwrite: Bool? = nil) {
+    func retry(_ itemID: CopyQueueItem.ID, shouldOverwrite: Bool? = nil, approval: SafeFileOperations.ConflictApproval? = nil) {
         guard let index = items.firstIndex(where: { $0.id == itemID }),
               items[index].state.canRetry else {
             return
@@ -345,8 +368,17 @@ final class CopyQueueViewModel: ObservableObject {
         // Approval belongs to this attempt. A failed attempt may be retried
         // after another writer has replaced the target, so never reuse it.
         items[index].shouldOverwrite = shouldOverwrite ?? false
+        items[index].approval = approval
         guard resetForRetry(itemID) else { return }
         startAvailableCopies()
+    }
+
+    func retry(_ itemID: CopyQueueItem.ID, resolved: ResolvedTransferItem) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              items[index].state.canRetry, items[index].sourceURL == resolved.source.standardizedFileURL else { return }
+        items[index].destinationURL = resolved.destination.standardizedFileURL
+        items[index].name = resolved.destination.lastPathComponent
+        retry(itemID, shouldOverwrite: resolved.shouldOverwrite, approval: resolved.approval)
     }
 
     func retryNeedsOverwrite(_ itemID: CopyQueueItem.ID) -> Bool {
@@ -367,6 +399,7 @@ final class CopyQueueViewModel: ObservableObject {
         for itemID in failedIDs {
             if let index = items.firstIndex(where: { $0.id == itemID }) {
                 items[index].shouldOverwrite = false
+                items[index].approval = nil
             }
             _ = resetForRetry(itemID)
         }
@@ -436,6 +469,7 @@ final class CopyQueueViewModel: ObservableObject {
         let destinationURL = items[index].destinationURL
         let operation = items[index].operation
         let shouldOverwrite = items[index].shouldOverwrite
+        let approval = items[index].approval
         let progressThrottle = CopyProgressUpdateThrottle()
 
         tasks[itemID] = Task {
@@ -445,6 +479,7 @@ final class CopyQueueViewModel: ObservableObject {
                     sourceURL: sourceURL,
                     destinationURL: destinationURL,
                     overwrite: shouldOverwrite,
+                    approval: approval,
                     totalBytes: { total in
                         Task { @MainActor in
                             self.updateTotalBytes(total, for: itemID)

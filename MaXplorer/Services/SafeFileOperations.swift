@@ -124,17 +124,86 @@ nonisolated enum SafeFileOperations {
         } onCancel: { worker.cancel() }
     }
 
+    struct ConflictEntryDetails: Equatable, Sendable {
+        let name: String
+        let kind: String
+        let byteCount: Int64
+        let modifiedAt: Date
+    }
+
+    struct ConflictApproval: Equatable, Sendable {
+        fileprivate let source: URL
+        fileprivate let destination: URL
+        fileprivate let sourceParent: Fingerprint
+        fileprivate let destinationParent: Fingerprint
+        fileprivate let sourceSnapshot: Snapshot
+        fileprivate let destinationSnapshot: Snapshot
+    }
+
+    struct ConflictComparison: Equatable, Sendable {
+        let source: ConflictEntryDetails
+        let destination: ConflictEntryDetails
+        let approval: ConflictApproval
+    }
+
+    static func captureConflictComparison(sourceURL: URL, destinationURL: URL) async throws -> ConflictComparison {
+        try Task.checkCancellation()
+        let worker = Task.detached(priority: .background) {
+            guard sourceURL.isFileURL, destinationURL.isFileURL,
+                  sourceURL.path != "/", destinationURL.path != "/" else {
+                throw Failure("冲突比较需要指向非根目录的文件 URL。")
+            }
+            let source = canonicalEntry(sourceURL)
+            let destination = canonicalEntry(destinationURL)
+            let sourceParent = try DirectoryHandle(source.deletingLastPathComponent())
+            let destinationParent = try DirectoryHandle(destination.deletingLastPathComponent())
+            let sourceSnapshot = try snapshot(source)
+            let destinationSnapshot = try snapshot(destination)
+            try sourceParent.validate()
+            try destinationParent.validate()
+            try Task.checkCancellation()
+            guard let sourceInfo = sourceSnapshot.entries[""],
+                  let destinationInfo = destinationSnapshot.entries[""],
+                  try requiredInfo(source) == sourceInfo,
+                  try requiredInfo(destination) == destinationInfo else {
+                throw Failure("比较期间项目发生变化，请重新比较。")
+            }
+            let approval = ConflictApproval(
+                source: source, destination: destination,
+                sourceParent: sourceParent.identity, destinationParent: destinationParent.identity,
+                sourceSnapshot: sourceSnapshot, destinationSnapshot: destinationSnapshot
+            )
+            return ConflictComparison(
+                source: conflictDetails(source, snapshot: sourceSnapshot, root: sourceInfo),
+                destination: conflictDetails(destination, snapshot: destinationSnapshot, root: destinationInfo),
+                approval: approval
+            )
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: { worker.cancel() }
+    }
+
+    private static func conflictDetails(_ url: URL, snapshot: Snapshot, root: Fingerprint) -> ConflictEntryDetails {
+        let kind = root.isDirectory ? "文件夹" : (root.kind == S_IFLNK ? "符号链接" : "文件")
+        return ConflictEntryDetails(
+            name: url.lastPathComponent, kind: kind, byteCount: snapshot.bytes,
+            modifiedAt: Date(timeIntervalSince1970: Double(root.modifiedSeconds) + Double(root.modifiedNanos) / 1_000_000_000)
+        )
+    }
+
     static func perform(
         _ operation: CopyQueueOperation,
         sourceURL: URL,
         destinationURL: URL,
         overwrite: Bool,
+        approval: ConflictApproval? = nil,
         totalBytes: @escaping @Sendable (Int64) -> Void = { _ in },
         progress: @escaping @Sendable (Int64) -> Void
     ) async throws {
         let worker = Task.detached(priority: .background) {
             try transact(operation, source: sourceURL, destination: destinationURL,
-                         overwrite: overwrite, totalBytes: totalBytes, progress: progress)
+                         overwrite: overwrite, approval: approval, totalBytes: totalBytes, progress: progress)
         }
         try await withTaskCancellationHandler {
             try await worker.value
@@ -144,10 +213,14 @@ nonisolated enum SafeFileOperations {
     private static func transact(
         _ operation: CopyQueueOperation, source: URL, destination: URL,
         overwrite: Bool,
+        approval: ConflictApproval?,
         totalBytes: @escaping @Sendable (Int64) -> Void,
         progress: @escaping @Sendable (Int64) -> Void
     ) throws {
         try Task.checkCancellation()
+        guard approval == nil || overwrite else {
+            throw Failure("冲突批准只适用于覆盖操作。")
+        }
         guard source.isFileURL, destination.isFileURL,
               source.path != "/", destination.path != "/" else {
             throw Failure("文件操作需要指向非根目录的文件 URL。")
@@ -181,7 +254,18 @@ nonisolated enum SafeFileOperations {
         totalBytes(before.bytes)
         // Editing an existing descendant does not change a directory's own
         // mtime/ctime. Include its complete old tree before an overwrite.
-        let destinationBefore = destinationInfo?.isDirectory == true ? try snapshot(destination) : nil
+        let destinationBefore = destinationInfo?.isDirectory == true || approval != nil ? try snapshot(destination) : nil
+        if let approval {
+            guard source == approval.source, destination == approval.destination,
+                  sourceParent.identity.sameObject(as: approval.sourceParent),
+                  destinationParent.identity.sameObject(as: approval.destinationParent),
+                  before == approval.sourceSnapshot,
+                  destinationBefore == approval.destinationSnapshot,
+                  before.entries[""] == sourceInfo,
+                  destinationBefore?.entries[""] == destinationInfo else {
+                throw Failure("批准后源项目、目标项目或父目录已发生变化，请重新比较并确认。未修改任何项目。")
+            }
+        }
         try Task.checkCancellation()
         try sourceParent.validate()
         try destinationParent.validate()
@@ -637,7 +721,7 @@ nonisolated enum SafeFileOperations {
         }
     }
 
-    private struct Snapshot: Equatable {
+    fileprivate struct Snapshot: Equatable, Sendable {
         var entries: [String: Fingerprint] = [:]
         var bytes: Int64 = 0
     }
@@ -662,7 +746,7 @@ nonisolated enum SafeFileOperations {
         return result
     }
 
-    private struct Fingerprint: Equatable {
+    fileprivate struct Fingerprint: Equatable, Sendable {
         let device: dev_t
         let inode: ino_t
         let mode: mode_t
