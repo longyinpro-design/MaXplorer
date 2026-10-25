@@ -364,7 +364,7 @@ private struct ActiveBrowserView: View {
                 case .files:
                     VStack(spacing: 0) {
                         BrowserToolbar()
-                        FileTableView(
+                        FileBrowserWorkspace(
                             renameItem: $renameItem,
                             renameText: $renameText,
                             itemsPendingTrash: $itemsPendingTrash

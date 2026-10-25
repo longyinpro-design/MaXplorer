@@ -257,6 +257,13 @@ struct MaXplorerApp: App {
                         Text(mode.title).tag(mode)
                     }
                 }
+                Toggle("显示右侧预览与详情栏", isOn: $settings.inspectorVisible)
+                    .keyboardShortcut("i", modifiers: [.command, .option])
+                    .disabled(tabs.isSearchActive || tabs.isSpaceAnalyzerActive || tabs.isCopyQueueActive || model.detailDestination != .files)
+                Picker("右侧栏内容", selection: $settings.inspectorMode) {
+                    Text("预览").tag(FileInspectorPreferences.Mode.preview)
+                    Text("详情").tag(FileInspectorPreferences.Mode.details)
+                }
                 Picker("分组依据", selection: $settings.browserGrouping) {
                     ForEach(FileGroupingMode.allCases) { grouping in
                         Text(grouping.title).tag(grouping)

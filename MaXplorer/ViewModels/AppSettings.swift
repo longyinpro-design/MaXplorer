@@ -38,6 +38,25 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var inspectorVisible: Bool {
+        didSet { persistInspectorPreferences() }
+    }
+    @Published var inspectorMode: FileInspectorPreferences.Mode {
+        didSet { persistInspectorPreferences() }
+    }
+    @Published var inspectorWidth: Double {
+        didSet {
+            let width = FileInspectorPreferences.clampedWidth(inspectorWidth)
+            if inspectorWidth != width { inspectorWidth = width }
+            persistInspectorPreferences()
+        }
+    }
+
+    private func persistInspectorPreferences() {
+        FileInspectorPreferences(isVisible: inspectorVisible, mode: inspectorMode, width: inspectorWidth)
+            .save(to: presentationDefaults)
+    }
+
     @Published var appearance: AppAppearance {
         didSet {
             UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey)
@@ -172,6 +191,10 @@ final class AppSettings: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         presentationDefaults = defaults
+        let inspector = FileInspectorPreferences(defaults: defaults)
+        inspectorVisible = inspector.isVisible
+        inspectorMode = inspector.mode
+        inspectorWidth = inspector.width
         browserViewMode = defaults.string(forKey: "BrowserViewMode")
             .flatMap(FileBrowserViewMode.init(rawValue:)) ?? .details
         browserGrouping = defaults.string(forKey: "BrowserGrouping")

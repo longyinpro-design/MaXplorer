@@ -114,6 +114,7 @@ nonisolated func expect(_ condition: @autoclosure () -> Bool, _ message: String)
         await fileBrowserPresentationTests()
         await directoryTreeTests()
         await recentFilesTests()
+        await fileInspectorTests()
         print("RESULT passed=\(passed) failed=\(failed)")
         if failed != 0 || passed == 0 { exit(1) }
     }

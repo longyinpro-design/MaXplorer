@@ -226,6 +226,17 @@ struct BrowserPresentationMenu: View {
                 Text("特大").tag(160.0)
             }
             .disabled(settings.browserViewMode == .details)
+            if !model.isSearchActive {
+                Divider()
+                Toggle("显示右侧预览与详情栏", isOn: $settings.inspectorVisible)
+                if settings.inspectorVisible {
+                    Picker("右侧栏内容", selection: $settings.inspectorMode) {
+                        Text("预览").tag(FileInspectorPreferences.Mode.preview)
+                        Text("详情").tag(FileInspectorPreferences.Mode.details)
+                    }
+                }
+                Divider()
+            }
             Picker("分组依据", selection: $settings.browserGrouping) {
                 ForEach(FileGroupingMode.allCases) { grouping in
                     Text(grouping.title).tag(grouping)
