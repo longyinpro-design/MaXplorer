@@ -314,7 +314,7 @@ extension FileOperationTests {
             let a = try file(dir, "a")
             let b = try file(dir, "b")
             let destination = try directory(dir, "destination")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.enqueue([(a, false), (b, false)], to: destination)
             let cancelledID = queue.items[0].id

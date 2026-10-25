@@ -12,13 +12,34 @@ nonisolated enum SafeFileOperations {
     /// has no runtime/environment switch capable of enabling them.
     enum FailurePoint: Hashable {
         case copyData, publishPayload, rollbackBackup, restorePermissions
-        case cleanupStaging, cleanupBackup, probeSwap, publishSwap
+        case cleanupStaging, cleanupBackup, probeSwap, publishSwap, renameExclusive
     }
 #if MAXPLORER_FAULT_TESTS
     private static let failureLock = NSLock()
     private static var injectedFailures: [FailurePoint: Int32] = [:]
     private static var observedFailures: Set<FailurePoint> = []
     private static var swapProbeCount = 0
+
+    static func renameExclusiveForTesting(from source: URL, to destination: URL) throws -> Int32 {
+        let sourceParent = try DirectoryHandle(source.deletingLastPathComponent())
+        let destinationParent = try DirectoryHandle(destination.deletingLastPathComponent())
+        let result = renameExclusive(from: sourceParent, name: source.lastPathComponent,
+                                     to: destinationParent, name: destination.lastPathComponent)
+        return result == 0 ? 0 : errno
+    }
+
+    static func resetExclusiveCapabilitiesForTesting() {
+        capabilityLock.lock()
+        exclusiveCapabilities = [:]
+        capabilityLock.unlock()
+    }
+
+    static func exclusiveCapabilityForTesting(at directory: URL) -> Bool? {
+        let volume = volumeIdentifier(for: directory)
+        capabilityLock.lock()
+        defer { capabilityLock.unlock() }
+        return volume.flatMap { exclusiveCapabilities[$0] }
+    }
 
     static func resetSwapCapabilitiesForTesting() {
         capabilityLock.lock()
@@ -75,6 +96,7 @@ nonisolated enum SafeFileOperations {
     private static let mutationLock = NSLock()
     private static let capabilityLock = NSLock()
     private static var swapCapabilities: [String: Bool] = [:]
+    private static var exclusiveCapabilities: [String: Bool] = [:]
     private static let fallbackOverrideLock = NSLock()
     private static var forceSwapFallbackOverride = false
 
@@ -174,9 +196,8 @@ nonisolated enum SafeFileOperations {
                 guard try info(destination) == destinationInfo else {
                     throw Failure("移动前目标项目发生变化。未移动任何项目。")
                 }
-                if renameatx_np(sourceParent.fd, source.lastPathComponent,
-                                destinationParent.fd, destination.lastPathComponent,
-                                UInt32(RENAME_EXCL)) == 0 {
+                if renameExclusive(from: sourceParent, name: source.lastPathComponent,
+                                   to: destinationParent, name: destination.lastPathComponent) == 0 {
                     return 0
                 }
                 return errno
@@ -185,7 +206,7 @@ nonisolated enum SafeFileOperations {
                 progress(before.bytes)
                 return
             }
-            guard renameResult == EXDEV else { throw posix(renameResult, destination) }
+            guard renameResult == EXDEV else { throw exclusiveRenameError(renameResult, destination, parent: destinationParent) }
         }
 
         let swapSupported = destinationInfo != nil
@@ -233,14 +254,9 @@ nonisolated enum SafeFileOperations {
                 }
 
                 if destinationInfo == nil {
-                    let renamed = renameatx_np(
-                        stagingHandle.fd,
-                        "payload",
-                        destinationParent.fd,
-                        destination.lastPathComponent,
-                        UInt32(RENAME_EXCL)
-                    )
-                    guard renamed == 0 else { throw posix(errno, destination) }
+                    let renamed = renameExclusive(from: stagingHandle, name: "payload",
+                                                  to: destinationParent, name: destination.lastPathComponent)
+                    guard renamed == 0 else { throw exclusiveRenameError(errno, destination, parent: destinationParent) }
                     published = true
                 } else if swapSupported {
                     let renamed = systemCall(at: .publishSwap) {
@@ -338,6 +354,36 @@ nonisolated enum SafeFileOperations {
     }
 
     // MARK: - Volume capabilities
+
+    /// Observe actual publication attempts. A cached rejection must never skip
+    /// a retry or rollback: remote servers and mounted filesystems can change.
+    private static func renameExclusive(from source: DirectoryHandle, name sourceName: String,
+                                        to destination: DirectoryHandle, name destinationName: String) -> Int32 {
+        let volume = destination.volumeIdentity
+        let result = systemCall(at: .renameExclusive) {
+            renameatx_np(source.fd, sourceName, destination.fd, destinationName, UInt32(RENAME_EXCL))
+        }
+        let code = errno
+        if let volume, result == 0 || code == ENOTSUP || code == ENOSYS {
+            capabilityLock.lock()
+            exclusiveCapabilities[volume] = result == 0
+            capabilityLock.unlock()
+        }
+        errno = code
+        return result
+    }
+
+    private static func exclusiveRenameError(_ code: Int32, _ url: URL, parent: DirectoryHandle) -> NSError {
+        let volume = parent.volumeIdentity
+        capabilityLock.lock()
+        let unsupported = volume.flatMap { exclusiveCapabilities[$0] } == false
+        capabilityLock.unlock()
+        guard unsupported, code == ENOTSUP || code == ENOSYS else { return posix(code, url) }
+        return NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [
+            NSFilePathErrorKey: url.path,
+            NSLocalizedDescriptionKey: "目标文件系统不支持排他重命名，无法安全发布项目：\(url.path)"
+        ])
+    }
 
     private static func supportsSwapRename(at directory: URL) -> Bool {
         if isSwapFallbackForced() { return false }
@@ -439,29 +485,24 @@ nonisolated enum SafeFileOperations {
         let backupName = ".maxplorer-backup-\(UUID().uuidString)"
         let backupURL = destinationParent.url.appendingPathComponent(backupName)
 
-        guard renameatx_np(
-            destinationParent.fd,
-            destination.lastPathComponent,
-            destinationParent.fd,
-            backupName,
-            UInt32(RENAME_EXCL)
-        ) == 0 else {
-            throw posix(errno, destination)
+        guard renameExclusive(from: destinationParent, name: destination.lastPathComponent,
+                              to: destinationParent, name: backupName) == 0 else {
+            throw exclusiveRenameError(errno, destination, parent: destinationParent)
         }
 
         guard systemCall(at: .publishPayload, {
-            renameatx_np(stagingHandle.fd, "payload", destinationParent.fd,
-                         destination.lastPathComponent, UInt32(RENAME_EXCL))
+            renameExclusive(from: stagingHandle, name: "payload",
+                            to: destinationParent, name: destination.lastPathComponent)
         }) == 0 else {
             let publishCode = errno
             let rollback = systemCall(at: .rollbackBackup) {
-                renameatx_np(destinationParent.fd, backupName, destinationParent.fd,
-                             destination.lastPathComponent, UInt32(RENAME_EXCL))
+                renameExclusive(from: destinationParent, name: backupName,
+                                to: destinationParent, name: destination.lastPathComponent)
             }
             if rollback != 0 {
                 throw Failure("发布失败，旧目标备份保留在 \(backupURL.path)，且无法恢复原名称。")
             }
-            throw posix(publishCode, destination)
+            throw exclusiveRenameError(publishCode, destination, parent: destinationParent)
         }
 
         return backupURL
@@ -660,6 +701,11 @@ nonisolated enum SafeFileOperations {
         let fd: Int32
         let url: URL
         let identity: Fingerprint
+        lazy var volumeIdentity: String? = {
+            var info = statfs()
+            guard fstatfs(fd, &info) == 0 else { return nil }
+            return "\(info.f_fsid.val.0):\(info.f_fsid.val.1)"
+        }()
         init(_ url: URL) throws {
             let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
             guard descriptor >= 0 else { throw posix(errno, url) }

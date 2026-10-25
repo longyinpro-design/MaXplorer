@@ -7,7 +7,7 @@ extension FileOperationTests {
             await test("queue running pause resume \(operation) concurrency \(concurrency)") { dir in
                 let destination = try directory(dir, "destination")
                 let sources = try (0..<(concurrency * 2 + 2)).map { try file(dir, "item-\($0)", "payload-\($0)") }
-                let queue = CopyQueueViewModel()
+                let queue = CopyQueueViewModel(recordDestinations: { _ in })
                 queue.maximumConcurrentCopies = concurrency
                 if operation == .copy {
                     queue.enqueue(sources.map { ($0, false) }, to: destination)
@@ -38,7 +38,7 @@ extension FileOperationTests {
             await test("queue paused cancellation and retry \(operation) concurrency \(concurrency)") { dir in
                 let destination = try directory(dir, "destination")
                 let sources = try (0..<(concurrency * 2 + 2)).map { try file(dir, "item-\($0)") }
-                let queue = CopyQueueViewModel()
+                let queue = CopyQueueViewModel(recordDestinations: { _ in })
                 queue.maximumConcurrentCopies = concurrency
                 if operation == .copy {
                     queue.enqueue(sources.map { ($0, false) }, to: destination)
@@ -71,7 +71,7 @@ extension FileOperationTests {
             let source = try file(dir, "source")
             let destination = try directory(dir, "destination")
             let target = try file(destination, "source", "old")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.enqueue([(source, false)], to: destination)
             try await waitFor { queue.failedCount == 1 }
@@ -95,7 +95,7 @@ extension FileOperationTests {
             let source = try file(dir, "source", "new")
             let destination = try directory(dir, "destination")
             let target = try file(destination, "source", "old")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.enqueue([(source, false)], to: destination)
             try await waitFor { queue.failedCount == 1 }
             let id = queue.items[0].id
@@ -116,7 +116,7 @@ extension FileOperationTests {
             let a = try file(dir, "a")
             let b = try file(dir, "b")
             let destination = try directory(dir, "destination")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.pause()
             queue.enqueue([(a, false), (b, false)], to: destination)
@@ -137,7 +137,7 @@ extension FileOperationTests {
             let source = try file(dir, "source", "new")
             let destination = try directory(dir, "destination")
             let target = try file(destination, "source", "old")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.enqueue([(source, false)], to: destination)
 
@@ -158,7 +158,7 @@ extension FileOperationTests {
         await test("queue duplicate copies to an explicit destination name") { dir in
             let source = try file(dir, "source", "content")
             let destination = dir.appendingPathComponent("source copy")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.enqueueDuplicates([(source: source, destination: destination)])
 
@@ -172,7 +172,7 @@ extension FileOperationTests {
             let source = try file(dir, "source", "new")
             let destination = try directory(dir, "destination")
             let target = try file(destination, "source", "old")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.enqueue([(source, false)], to: destination)
 
@@ -192,7 +192,7 @@ extension FileOperationTests {
             let source = dir.appendingPathComponent("source")
             let destination = try directory(dir, "destination")
             let target = try file(destination, "source", "old")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.enqueue([(source, true)], to: destination)
             try await waitFor { queue.failedCount == 1 }
             let item = queue.items[0]
@@ -209,7 +209,7 @@ extension FileOperationTests {
             let source = try file(dir, "source")
             let destination = try directory(dir, "destination")
             _ = try file(destination, "source", "old")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 1
             queue.enqueue([(source, false)], to: destination)
 
@@ -229,7 +229,7 @@ extension FileOperationTests {
             let destination = try directory(dir, "destination")
             _ = try file(destination, "a", "old-a")
             _ = try file(destination, "b", "old-b")
-            let queue = CopyQueueViewModel()
+            let queue = CopyQueueViewModel(recordDestinations: { _ in })
             queue.maximumConcurrentCopies = 2
             queue.enqueue([(a, false), (b, false)], to: destination)
 

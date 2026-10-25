@@ -1497,16 +1497,9 @@ final class FileBrowserViewModel: ObservableObject {
         guard !didScanRecoveryResidues else { return }
         didScanRecoveryResidues = true
 
-        var roots = [FileManager.default.homeDirectoryForCurrentUser]
-        if let lastTransferDestinationURL {
-            roots.append(lastTransferDestinationURL)
-        }
-        if currentURL.isFileURL {
-            roots.append(currentURL)
-        }
-
-        var seen = Set<URL>()
-        let uniqueRoots = roots.filter { seen.insert($0.standardizedFileURL).inserted }
+        let uniqueRoots = RecentTransferDestinations.shared.recoveryRoots(including: [
+            FileManager.default.homeDirectoryForCurrentUser, currentURL
+        ])
 
         Task { [weak self] in
             let residues = await Task.detached(priority: .utility) {

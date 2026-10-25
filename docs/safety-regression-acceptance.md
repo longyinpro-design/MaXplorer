@@ -73,3 +73,19 @@ Following `aa3bab3fc09fb073934ec060388296416f60cbc0`, capability results now cac
 - The universal Release DMG above belongs to the earlier `aa3bab3` candidate; this follow-up has its own Debug build and commit CI. It does not relabel that DMG as a newer build.
 
 The first delivery CI [40165453076](https://github.com/longyinpro-design/MaXplorer/actions/runs/40165453076) succeeded on `aa3bab3`: build, 174 core tests, 13 search/performance tests, 5 drag payload tests and 13 native seam tests. The follow-up's CI must be checked independently after push.
+
+
+## Recovery-root and exclusive-rename completion
+
+Following `7e1f2100f9fb23cd6a7dfed9dddb409b2c65ab38`:
+
+- Every queued copy/move/duplicate records its destination parent in a bounded history (20 roots by default); retry refreshes that root. Recording only normalizes URL strings and writes preferences. Startup recovery scans these roots plus home/current and the legacy chooser destination on the existing background worker. Scanning does not delete residues. Older roots beyond the history limit are not searched automatically.
+- All exclusive renames pass through one helper, which observes capability using the opened destination directory's filesystem identity. Success and explicit ENOTSUP/ENOSYS update the observation; EXDEV/EEXIST/EACCES/EINVAL do not. The cache adds a clear unsupported diagnostic while preserving POSIX error identity. Every actual rename, retry and rollback still executes its syscall.
+- New history tests use isolated preference suites, and existing queue fixtures inject a no-op recorder, so they do not populate the user's production transfer history.
+- Focused tests: 3 recovery-history + 11 exclusive-rename cases PASS. Full integrated regression/performance: **193 PASS / 0 FAIL**, receipt `file-operation-tests/20261025T023739-83272`.
+- Actual private APFS cross-volume matrix: **4 PASS / 0 FAIL**, receipt `file-operation-tests/20261025T023826-84685`.
+- Private HFS+ real ENOSPC/capacity and space calculations: **6 PASS / 0 FAIL**, receipt `file-operation-tests/20261025T023828-84736`. Three cases exercise the actual private low-space filesystem; the remaining three check space calculations. Both private images were detached.
+- Actual application Debug build and strict signature verification: PASS. Source manifest and build log: `safety-completion-20261025/candidate.json` and `safety-completion-20261025/build.log`. No app launch or installation.
+- Independent review matched all ten production/test/script hashes and found no blocking issue. Documentation was added afterwards without changing those sources.
+
+CI [40165802946](https://github.com/longyinpro-design/MaXplorer/actions/runs/40165802946) succeeded on `7e1f210`: build, 177 core, 13 search/performance, 5 payload and 13 native drag cases. This completion receives its own exact-commit CI after push. It does not change the candidate identity of the earlier Release DMG. Real SMB/exFAT, GUI responsiveness/recovery interactions and the rest of the release matrix remain unaccepted.

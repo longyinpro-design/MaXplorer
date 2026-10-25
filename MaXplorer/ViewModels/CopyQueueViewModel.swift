@@ -108,6 +108,12 @@ final class CopyQueueViewModel: ObservableObject {
         }
     }
 
+    private let recordDestinations: @MainActor ([URL]) -> Void
+
+    init(recordDestinations: @escaping @MainActor ([URL]) -> Void = { RecentTransferDestinations.shared.record($0) }) {
+        self.recordDestinations = recordDestinations
+    }
+
     private var tasks: [CopyQueueItem.ID: Task<Void, Never>] = [:]
     private var aggregateTotalItemCount = 0
     private var aggregateFinishedItemCount = 0
@@ -389,6 +395,7 @@ final class CopyQueueViewModel: ObservableObject {
             return false
         }
 
+        recordDestinations([items[index].destinationURL.deletingLastPathComponent()])
         tasks[itemID] = nil
         aggregateFinishedItemCount = max(0, aggregateFinishedItemCount - 1)
         items[index].state = .pending
@@ -566,6 +573,7 @@ final class CopyQueueViewModel: ObservableObject {
             aggregateFinishedItemCount = 0
         }
 
+        recordDestinations(newItems.map { $0.destinationURL.deletingLastPathComponent() })
         aggregateTotalItemCount += newItems.count
         items.append(contentsOf: newItems)
     }
