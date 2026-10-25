@@ -30,6 +30,10 @@ if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
         "$repo/MaXplorer/Services/FileSearchService.swift"
         "$repo/MaXplorer/Services/TransferPlanService.swift"
         "$repo/MaXplorer/Services/ArchiveService.swift"
+        "$repo/MaXplorer/Services/ArchiveCatalogService.swift"
+        "$repo/MaXplorer/Models/ArchiveCatalog.swift"
+        "$repo/MaXplorer/Models/ArchiveBrowserSession.swift"
+        "$repo/MaXplorer/ViewModels/ArchiveBrowserModel.swift"
         "$repo/MaXplorer/Services/FileUndoService.swift"
         "$repo/MaXplorer/Services/RecoveryScanner.swift"
         "$repo/MaXplorer/Services/RecentTransferDestinations.swift"
@@ -64,6 +68,7 @@ optimization=(-Onone)
 if [[ "${MAXPLORER_TEST_OPTIMIZED:-0}" == "1" ]]; then optimization=(-O); fi
 printf 'Test receipt: %s\nSwift optimization: %s\n' "$run" "${optimization[0]}"
 xcrun swiftc -D MAXPLORER_FAULT_TESTS -parse-as-library -swift-version 5 -default-isolation MainActor -warnings-as-errors "${optimization[@]}" \
+    -I "$repo/MaXplorer/Support/CArchive" \
     -module-cache-path "$AGENT_BUILD_ROOT/swift-module-cache" \
     "${sources[@]}" "$repo/Tests/"*.swift -o "$run/file-operation-tests" 2>&1 | tee "$run/compile.log"
 "$run/file-operation-tests" "$run/fixtures" 2>&1 | tee "$run/tests.log"

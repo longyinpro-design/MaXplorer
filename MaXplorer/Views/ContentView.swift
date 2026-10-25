@@ -131,6 +131,16 @@ private struct ActiveBrowserView: View {
         .sheet(isPresented: $model.isBatchRenamePresented) {
             BatchRenameSheet(model: model)
         }
+        .sheet(item: Binding(
+            get: { model.archiveBrowserRequest },
+            set: { if $0 == nil { model.closeArchiveBrowser() } }
+        ), onDismiss: { model.commitArchiveSelection() }) { request in
+            ArchiveBrowserView(archiveURL: request.archiveURL) { catalog, ids, destination in
+                model.finishArchiveSelection(requestID: request.id, catalog: catalog, ids: ids, destination: destination)
+            } onClose: {
+                model.closeArchiveBrowser(requestID: request.id)
+            }
+        }
         .sheet(isPresented: $model.isRecentFilesPresented) {
             RecentFilesView { url in
                 model.isRecentFilesPresented = false
@@ -162,9 +172,13 @@ private struct ActiveBrowserView: View {
         } message: {
             if let request = model.archiveConflictRequest {
                 if request.isCompression {
-                    Text("目标位置已有“\(request.archiveName)”。覆盖会替换现有压缩文件。")
+                    if let comparison = request.comparison {
+                        Text("目标位置已有“\(request.archiveName)”。\n新压缩包：\(comparison.source.kind)，\(ByteCountFormatter.string(fromByteCount: comparison.source.byteCount, countStyle: .file))\n现有目标：\(comparison.destination.kind)，\(ByteCountFormatter.string(fromByteCount: comparison.destination.byteCount, countStyle: .file))\n覆盖会整体替换目标，不能撤销。")
+                    } else {
+                        Text("目标位置已有“\(request.archiveName)”。覆盖会整体替换目标，不能撤销。")
+                    }
                 } else {
-                    Text("“\(request.archiveName)”中有 \(request.conflictCount) 个顶层项目与目标位置同名。")
+                    Text("“\(request.archiveName)”中有 \(request.conflictCount) 个顶层项目与目标位置同名。覆盖会整体替换同名文件夹（包括其中原有的其他内容），不会合并；不能撤销。")
                 }
             }
         }

@@ -2,6 +2,7 @@ import Foundation
 
 nonisolated enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
     case zip
+    case sevenZip
     case tarGz
     case tar
     case gzip
@@ -11,6 +12,7 @@ nonisolated enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
     var title: String {
         switch self {
         case .zip: return "ZIP"
+        case .sevenZip: return "7z"
         case .tarGz: return "TAR.GZ"
         case .tar: return "TAR"
         case .gzip: return "GZIP（单个文件）"
@@ -20,6 +22,7 @@ nonisolated enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
     var fileExtension: String {
         switch self {
         case .zip: return "zip"
+        case .sevenZip: return "7z"
         case .tarGz: return "tar.gz"
         case .tar: return "tar"
         case .gzip: return "gz"
@@ -53,21 +56,54 @@ nonisolated enum ArchiveError: LocalizedError {
     }
 }
 
+nonisolated struct PreparedArchiveCompression: Equatable, Sendable {
+    let staging: URL
+    let archive: URL
+    let destination: URL
+}
+
 nonisolated struct ArchiveService {
     static let archiveExtensions: Set<String> = [
-        "zip", "tar", "gz", "tgz", "bz2", "tbz", "tbz2"
+        "zip", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "7z", "rar"
     ]
 
     static func isArchive(_ url: URL) -> Bool {
-        extractionKind(for: url) != nil
+        extractionKind(for: url) != nil || usesCatalogBackend(url)
     }
 
-    static func compress(
-        items: [URL],
-        to destination: URL,
-        format: ArchiveFormat,
-        overwrite: Bool = false
+    static func isBrowsable(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return [".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".7z", ".rar"].contains { name.hasSuffix($0) }
+    }
+
+    private static func usesCatalogBackend(_ url: URL) -> Bool {
+        ["7z", "rar"].contains(url.pathExtension.lowercased())
+    }
+
+    static func compress(items: [URL], to destination: URL, format: ArchiveFormat, overwrite: Bool = false) async throws {
+        let prepared = try await prepareCompression(items: items, to: destination, format: format)
+        defer { removeStaging(prepared.staging) }
+        try await publishCompression(prepared, overwrite: overwrite)
+    }
+
+    /// The UI prepares private output before asking to replace a target. Its
+    /// approval can then bind both complete source and target snapshots.
+    static func prepareCompression(items: [URL], to destination: URL, format: ArchiveFormat) async throws -> PreparedArchiveCompression {
+        let worker = Task.detached(priority: .utility) {
+            try await prepareCompressionOutput(items: items, to: destination, format: format)
+        }
+        return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+    }
+
+    static func publishCompression(
+        _ prepared: PreparedArchiveCompression, overwrite: Bool,
+        approval: SafeFileOperations.ConflictApproval? = nil
     ) async throws {
+        try await SafeFileOperations.perform(.move, sourceURL: prepared.archive, destinationURL: prepared.destination,
+                                             overwrite: overwrite, approval: approval, progress: { _ in })
+    }
+
+    private static func prepareCompressionOutput(items: [URL], to destination: URL, format: ArchiveFormat) async throws -> PreparedArchiveCompression {
         try Task.checkCancellation()
         guard let parent = items.first?.deletingLastPathComponent() else {
             throw ArchiveError.unsupportedArchive
@@ -89,7 +125,8 @@ nonisolated struct ArchiveService {
         }
 
         let staging = try makeStagingDirectory(in: destination.deletingLastPathComponent())
-        defer { try? FileManager.default.removeItem(at: staging) }
+        var delivered = false
+        defer { if !delivered { removeStaging(staging) } }
         let temporaryArchive = staging.appendingPathComponent("archive.\(format.fileExtension)")
 
         let names = items.map(\.lastPathComponent)
@@ -99,6 +136,11 @@ nonisolated struct ArchiveService {
                 "/usr/bin/zip",
                 arguments: ["-q", "-r", "-y", temporaryArchive.path] + names,
                 currentDirectory: standardizedParent
+            )
+        case .sevenZip:
+            try await run(
+                "/usr/bin/tar", arguments: ["--format", "7zip", "-cf", temporaryArchive.path,
+                                             "-C", standardizedParent.path, "--"] + names
             )
         case .tarGz, .tar:
             try await run(
@@ -117,13 +159,8 @@ nonisolated struct ArchiveService {
             throw ArchiveError.commandFailed("压缩工具没有生成输出文件。")
         }
 
-        try await SafeFileOperations.perform(
-            .move,
-            sourceURL: temporaryArchive,
-            destinationURL: destination,
-            overwrite: overwrite,
-            progress: { _ in }
-        )
+        delivered = true
+        return PreparedArchiveCompression(staging: staging, archive: temporaryArchive, destination: destination)
     }
 
     static func extract(
@@ -131,6 +168,13 @@ nonisolated struct ArchiveService {
         toStagingIn destinationDirectory: URL
     ) async throws -> URL {
         try Task.checkCancellation()
+        if usesCatalogBackend(archive) {
+            let catalog = try await ArchiveCatalogService.catalog(archive: archive)
+            if catalog.entries.isEmpty { return try makeStagingDirectory(in: destinationDirectory) }
+            return try await ArchiveCatalogService.extract(
+                catalog: catalog, selectedIDs: Set(catalog.entries.map(\.id)), toStagingIn: destinationDirectory
+            )
+        }
         guard let kind = extractionKind(for: archive) else {
             throw ArchiveError.unsupportedArchive
         }
@@ -194,27 +238,49 @@ nonisolated struct ArchiveService {
         }
     }
 
+    static func captureConflictApprovals(items: [URL], in destinationDirectory: URL) async throws -> [URL: SafeFileOperations.ConflictApproval] {
+        var result: [URL: SafeFileOperations.ConflictApproval] = [:]
+        for item in items {
+            try Task.checkCancellation()
+            let comparison = try await SafeFileOperations.captureConflictComparison(
+                sourceURL: item, destinationURL: destinationDirectory.appendingPathComponent(item.lastPathComponent)
+            )
+            result[item] = comparison.approval
+        }
+        return result
+    }
+
     static func moveExtractedItems(
         from staging: URL,
         to destinationDirectory: URL,
-        overwrite: Bool
+        overwrite: Bool,
+        approvals: [URL: SafeFileOperations.ConflictApproval]? = nil
     ) async throws {
-        let items = try topLevelItems(in: staging)
-        for item in items {
-            try Task.checkCancellation()
-            let destination = destinationDirectory.appendingPathComponent(item.lastPathComponent)
-            let destinationExists = SafeFileOperations.entryExists(at: destination)
-            if destinationExists && !overwrite {
-                continue
+        let worker = Task.detached(priority: .utility) {
+            let items = try topLevelItems(in: staging)
+            for item in items {
+                try Task.checkCancellation()
+                let destination = destinationDirectory.appendingPathComponent(item.lastPathComponent)
+                if let approvals {
+                    if let approval = approvals[item] {
+                        if !overwrite { continue }
+                        try await SafeFileOperations.perform(.move, sourceURL: item, destinationURL: destination,
+                            overwrite: true, approval: approval, progress: { _ in })
+                    } else {
+                        // A name appearing after preflight is not an approved
+                        // overwrite or a planned skip. Exclusive publication fails.
+                        try await SafeFileOperations.perform(.move, sourceURL: item, destinationURL: destination,
+                            overwrite: false, progress: { _ in })
+                    }
+                } else {
+                    let destinationExists = SafeFileOperations.entryExists(at: destination)
+                    if destinationExists && !overwrite { continue }
+                    try await SafeFileOperations.perform(.move, sourceURL: item, destinationURL: destination,
+                        overwrite: destinationExists, progress: { _ in })
+                }
             }
-            try await SafeFileOperations.perform(
-                .move,
-                sourceURL: item,
-                destinationURL: destination,
-                overwrite: destinationExists,
-                progress: { _ in }
-            )
         }
+        try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
     }
 
     static func removeStaging(_ staging: URL) {

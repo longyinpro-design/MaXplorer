@@ -254,6 +254,12 @@ struct FileTableView: View {
                 }
                 .disabled(!canCompress(selection: selection))
 
+                Button("压缩为 7z…") {
+                    model.selectedItemIDs = selection
+                    model.showCompressPanel(format: .sevenZip)
+                }
+                .disabled(!canCompress(selection: selection))
+
                 Button("压缩为 TAR.GZ…") {
                     model.selectedItemIDs = selection
                     model.showCompressPanel(format: .tarGz)
@@ -271,6 +277,12 @@ struct FileTableView: View {
                     model.showCompressPanel(format: .gzip)
                 }
                 .disabled(!canCompress(selection: selection, format: .gzip))
+
+                Button("浏览压缩包…") {
+                    model.selectedItemIDs = selection
+                    model.showArchiveBrowser()
+                }
+                .disabled(!(selectedItem(for: selection).map { ArchiveService.isBrowsable($0.url) } ?? false))
 
                 Button("解压…") {
                     model.selectedItemIDs = selection

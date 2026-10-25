@@ -1,0 +1,44 @@
+[
+  {
+    "file": "test_read_format_rar.rar",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_rar.rar.uu",
+    "sha256": "d421b86f6290aefad61b2a36737253b2b30fe27c156bd95abfc230f24fe0307e",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  },
+  {
+    "file": "test_read_format_rar5_stored.rar",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_rar5_stored.rar.uu",
+    "sha256": "35d75e315d164d2e329afc28f7d844f013271b4fcffd4ddd78efcdd114a383a7",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  },
+  {
+    "file": "test_read_format_7zip_encryption.7z",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_7zip_encryption.7z.uu",
+    "sha256": "91f5427859ad1391c9fb877c98e4b55213c479f39fd012882f7d112388842076",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  },
+  {
+    "file": "test_read_format_7zip_encryption_header.7z",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_7zip_encryption_header.7z.uu",
+    "sha256": "6d91af6a1632666d014ea44736074b77a6722c820c8400d14e036f3b6f4538ac",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  },
+  {
+    "file": "test_read_format_rar5_compressed.rar",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_rar5_compressed.rar.uu",
+    "sha256": "68f9d7e2662cd5bc5607ba9c6bf1edbf121cf3b08011a7d8643091791750a7c8",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  },
+  {
+    "file": "test_read_format_rar_encryption_data.rar",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_rar_encryption_data.rar.uu",
+    "sha256": "84ba9afcf0673aab0d1421d931e76a19294b12117483879c4b58598d3d71e83e",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  },
+  {
+    "file": "test_read_format_rar_encryption_header.rar",
+    "source": "https://raw.githubusercontent.com/libarchive/libarchive/v3.7.4/libarchive/test/test_read_format_rar_encryption_header.rar.uu",
+    "sha256": "67fa99d6f1d07d6dce56da85d22cd6271c16fbc7aad5efc6046b30425cc799b0",
+    "encoding": "uu fixture decoded without modifying archive bytes"
+  }
+]

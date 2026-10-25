@@ -151,6 +151,11 @@ struct MaXplorerApp: App {
                 }
                 .disabled(!model.canCompress(format: .zip))
 
+                Button("压缩为 7z…") {
+                    model.showCompressPanel(format: .sevenZip)
+                }
+                .disabled(!model.canCompress(format: .sevenZip))
+
                 Button("压缩为 TAR.GZ…") {
                     model.showCompressPanel(format: .tarGz)
                 }
@@ -165,6 +170,9 @@ struct MaXplorerApp: App {
                     model.showCompressPanel(format: .gzip)
                 }
                 .disabled(!model.canCompress(format: .gzip))
+
+                Button("浏览压缩包…") { model.showArchiveBrowser() }
+                    .disabled(!(model.selectedItem.map { ArchiveService.isBrowsable($0.url) } ?? false))
 
                 Button("解压…") {
                     model.showExtractPanel()

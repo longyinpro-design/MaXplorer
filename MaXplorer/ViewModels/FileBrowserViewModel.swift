@@ -18,6 +18,7 @@ struct ArchiveConflictRequest: Identifiable, Equatable {
     let archiveName: String
     let conflictCount: Int
     var isCompression = false
+    var comparison: SafeFileOperations.ConflictComparison? = nil
 }
 
 enum ArchiveConflictResolution {
@@ -76,6 +77,8 @@ final class FileBrowserViewModel: ObservableObject {
     @Published private(set) var transferPlanScannedCount = 0
     @Published private(set) var transferPlanScannedBytes: Int64 = 0
     @Published var archiveConflictRequest: ArchiveConflictRequest?
+    @Published private(set) var archiveBrowserSession = ArchiveBrowserSession()
+    var archiveBrowserRequest: ArchiveBrowserSession.Request? { archiveBrowserSession.request }
     @Published var isArchiveOperationPresented = false
     @Published private(set) var archiveOperationTitle = ""
     @Published private(set) var archiveOperationError: String?
@@ -242,9 +245,8 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private struct PendingArchiveCompression {
-        let items: [URL]
-        let destination: URL
-        let format: ArchiveFormat
+        let prepared: PreparedArchiveCompression
+        let approval: SafeFileOperations.ConflictApproval
     }
 
     private struct PendingArchiveExtraction {
@@ -253,6 +255,7 @@ final class FileBrowserViewModel: ObservableObject {
         let items: [URL]
         let conflicts: [URL]
         let archiveName: String
+        let approvals: [URL: SafeFileOperations.ConflictApproval]
     }
 
     init(
@@ -338,6 +341,10 @@ final class FileBrowserViewModel: ObservableObject {
         transferPlanTask?.cancel()
         conflictTask?.cancel()
         archiveOperationTask?.cancel()
+        let archiveStaging = [pendingArchiveCompression?.prepared.staging, pendingArchiveExtraction?.staging].compactMap { $0 }
+        if !archiveStaging.isEmpty {
+            Task.detached { for staging in archiveStaging { ArchiveService.removeStaging(staging) } }
+        }
         undoJournalObservation?.cancel()
         volumeStatsRefreshTask?.cancel()
         volumeStatsLoadTask?.cancel()
@@ -1068,6 +1075,9 @@ final class FileBrowserViewModel: ObservableObject {
 
         if let navigationURL = selectedItem.navigationURL {
             navigate(to: navigationURL)
+        } else if ArchiveService.isBrowsable(selectedItem.url) {
+            RecentFilesStore.shared.record(selectedItem.url)
+            archiveBrowserSession.present(selectedItem.url)
         } else {
             if !selectedItem.isDirectory { RecentFilesStore.shared.record(selectedItem.url) }
             SystemActions.open(selectedItem.url)
@@ -1082,7 +1092,8 @@ final class FileBrowserViewModel: ObservableObject {
                     throw CocoaError(.fileReadUnsupportedScheme)
                 }
                 RecentFilesStore.shared.record(url)
-                SystemActions.open(url)
+                if ArchiveService.isBrowsable(url) { self.archiveBrowserSession.present(item.url) }
+                else { SystemActions.open(url) }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1597,6 +1608,8 @@ final class FileBrowserViewModel: ObservableObject {
         switch format {
         case .zip:
             panel.allowedContentTypes = [.zip]
+        case .sevenZip:
+            panel.allowedContentTypes = [UTType(filenameExtension: "7z") ?? .data]
         case .tar:
             panel.allowedContentTypes = [UTType(filenameExtension: "tar") ?? .data]
         case .tarGz, .gzip:
@@ -1609,6 +1622,27 @@ final class FileBrowserViewModel: ObservableObject {
                 self?.beginArchiveCompression(items: items, destination: destination, format: format)
             }
         }
+    }
+
+    func showArchiveBrowser() {
+        guard let item = selectedItem, !item.isNetworkLocation, ArchiveService.isBrowsable(item.url) else { return }
+        archiveBrowserSession.present(item.url)
+    }
+
+    func closeArchiveBrowser(requestID: UUID? = nil) {
+        archiveBrowserSession.close(requestID: requestID)
+    }
+
+    func finishArchiveSelection(requestID: UUID, catalog: ArchiveCatalog, ids: Set<String>, destination: URL) {
+        archiveBrowserSession.finish(requestID: requestID, catalog: catalog, ids: ids, destination: destination)
+    }
+
+    // Called only after the browser sheet has finished dismissing, so the
+    // existing operation/conflict sheets do not compete for the same presenter.
+    func commitArchiveSelection() {
+        guard let pending = archiveBrowserSession.takePendingAfterDismissal() else { return }
+        beginArchiveExtraction(archive: pending.catalog.archiveURL, destination: pending.destination,
+                               catalog: pending.catalog, selectedIDs: pending.ids)
     }
 
     func showExtractPanel() {
@@ -1648,6 +1682,10 @@ final class FileBrowserViewModel: ObservableObject {
             Task.detached { ArchiveService.removeStaging(staging) }
         }
         pendingArchiveExtraction = nil
+        if let pendingArchiveCompression {
+            let staging = pendingArchiveCompression.prepared.staging
+            Task.detached { ArchiveService.removeStaging(staging) }
+        }
         pendingArchiveCompression = nil
         archiveConflictRequest = nil
         isArchiveOperationPresented = false
@@ -1668,8 +1706,9 @@ final class FileBrowserViewModel: ObservableObject {
             pendingArchiveCompression = nil
             archiveConflictRequest = nil
             if resolution == .overwrite {
-                beginArchiveCompression(items: pending.items, destination: pending.destination,
-                                        format: pending.format, overwrite: true)
+                publishPreparedCompression(pending.prepared, approval: pending.approval)
+            } else {
+                Task.detached { ArchiveService.removeStaging(pending.prepared.staging) }
             }
             return
         }
@@ -1691,7 +1730,7 @@ final class FileBrowserViewModel: ObservableObject {
             do {
                 try await ArchiveService.moveExtractedItems(
                     from: pending.staging, to: pending.destinationDirectory,
-                    overwrite: resolution == .overwrite
+                    overwrite: resolution == .overwrite, approvals: pending.approvals
                 )
                 await Task.detached { ArchiveService.removeStaging(pending.staging) }.value
                 guard let self, generation == self.archiveOperationGeneration else { return }
@@ -1709,52 +1748,86 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
-    private func requestCompressionOverwrite(items: [URL], destination: URL, format: ArchiveFormat) {
-        pendingArchiveCompression = PendingArchiveCompression(items: items, destination: destination, format: format)
-        isArchiveOperationPresented = false
-        archiveConflictRequest = ArchiveConflictRequest(
-            archiveName: destination.lastPathComponent, conflictCount: 1, isCompression: true
-        )
-    }
-
-    private func beginArchiveCompression(
-        items: [URL], destination: URL, format: ArchiveFormat, overwrite: Bool = false
-    ) {
+    private func beginArchiveCompression(items: [URL], destination: URL, format: ArchiveFormat) {
         cancelArchiveOperation()
         let generation = archiveOperationGeneration
         isArchiveOperationPresented = true
         archiveOperationTitle = "正在压缩…"
         archiveOperationTask = Task { [weak self] in
+            var prepared: PreparedArchiveCompression?
             do {
-                if !overwrite {
-                    let exists = await Task.detached { SafeFileOperations.entryExists(at: destination) }.value
-                    guard !Task.isCancelled, let self, generation == self.archiveOperationGeneration else { return }
-                    if exists {
-                        self.requestCompressionOverwrite(items: items, destination: destination, format: format)
-                        return
-                    }
+                let output = try await ArchiveService.prepareCompression(items: items, to: destination, format: format)
+                prepared = output
+                try Task.checkCancellation()
+                guard let self, generation == self.archiveOperationGeneration else {
+                    await Task.detached { ArchiveService.removeStaging(output.staging) }.value
+                    return
                 }
-                try await ArchiveService.compress(items: items, to: destination, format: format, overwrite: overwrite)
-                guard !Task.isCancelled, let self, generation == self.archiveOperationGeneration else { return }
-                self.isArchiveOperationPresented = false
-                await self.reload(selecting: destination)
+                self.publishPreparedCompression(output, approval: nil)
+                prepared = nil // publication now owns the private output
             } catch is CancellationError {
+                if let prepared { await Task.detached { ArchiveService.removeStaging(prepared.staging) }.value }
                 guard let self, generation == self.archiveOperationGeneration else { return }
                 self.isArchiveOperationPresented = false
             } catch {
+                if let prepared { await Task.detached { ArchiveService.removeStaging(prepared.staging) }.value }
                 guard let self, generation == self.archiveOperationGeneration else { return }
-                let cocoa = error as NSError
-                if !overwrite && cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSFileWriteFileExistsError {
-                    self.requestCompressionOverwrite(items: items, destination: destination, format: format)
-                } else {
-                    self.archiveOperationError = error.localizedDescription
-                    self.isArchiveOperationPresented = true
-                }
+                self.archiveOperationError = error.localizedDescription
             }
         }
     }
 
-    private func beginArchiveExtraction(archive: URL, destination: URL) {
+    private func publishPreparedCompression(_ prepared: PreparedArchiveCompression, approval: SafeFileOperations.ConflictApproval?) {
+        archiveOperationGeneration += 1
+        let generation = archiveOperationGeneration
+        // The preparation task has already transferred output ownership.
+        // Do not cancel that task while it completes its final bookkeeping.
+        isArchiveOperationPresented = true
+        archiveOperationTitle = "正在完成压缩…"
+        archiveOperationError = nil
+        archiveOperationTask = Task { [weak self] in
+            do {
+                do {
+                    try await ArchiveService.publishCompression(prepared, overwrite: approval != nil, approval: approval)
+                } catch {
+                    let nsError = error as NSError
+                    guard approval == nil, nsError.domain == NSCocoaErrorDomain,
+                          nsError.code == NSFileWriteFileExistsError else { throw error }
+                    let comparison = try await SafeFileOperations.captureConflictComparison(
+                        sourceURL: prepared.archive, destinationURL: prepared.destination
+                    )
+                    try Task.checkCancellation()
+                    guard let self, generation == self.archiveOperationGeneration else {
+                        await Task.detached { ArchiveService.removeStaging(prepared.staging) }.value
+                        return
+                    }
+                    self.pendingArchiveCompression = PendingArchiveCompression(prepared: prepared, approval: comparison.approval)
+                    self.isArchiveOperationPresented = false
+                    self.archiveConflictRequest = ArchiveConflictRequest(
+                        archiveName: prepared.destination.lastPathComponent, conflictCount: 1, isCompression: true, comparison: comparison
+                    )
+                    return
+                }
+                await Task.detached { ArchiveService.removeStaging(prepared.staging) }.value
+                guard let self, generation == self.archiveOperationGeneration else { return }
+                self.isArchiveOperationPresented = false
+                await self.reload(selecting: prepared.destination)
+            } catch is CancellationError {
+                await Task.detached { ArchiveService.removeStaging(prepared.staging) }.value
+                guard let self, generation == self.archiveOperationGeneration else { return }
+                self.isArchiveOperationPresented = false
+            } catch {
+                await Task.detached { ArchiveService.removeStaging(prepared.staging) }.value
+                guard let self, generation == self.archiveOperationGeneration else { return }
+                self.archiveOperationError = error.localizedDescription
+                self.isArchiveOperationPresented = true
+            }
+        }
+    }
+
+    private func beginArchiveExtraction(
+        archive: URL, destination: URL, catalog: ArchiveCatalog? = nil, selectedIDs: Set<String>? = nil
+    ) {
         cancelArchiveOperation()
         let generation = archiveOperationGeneration
         isArchiveOperationPresented = true
@@ -1762,7 +1835,18 @@ final class FileBrowserViewModel: ObservableObject {
         archiveOperationTask = Task { [weak self] in
             var staging: URL?
             do {
-                let created = try await ArchiveService.extract(archive: archive, toStagingIn: destination)
+                let created: URL
+                if let catalog, let selectedIDs {
+                    created = try await ArchiveCatalogService.extract(catalog: catalog, selectedIDs: selectedIDs,
+                        toStagingIn: destination, progress: { [weak self] bytes in
+                            Task { @MainActor [weak self] in
+                                guard let self, generation == self.archiveOperationGeneration else { return }
+                                self.archiveOperationTitle = "正在提取… 已写入 " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                            }
+                        })
+                } else {
+                    created = try await ArchiveService.extract(archive: archive, toStagingIn: destination)
+                }
                 staging = created
                 let (items, conflicts) = try await Task.detached(priority: .utility) {
                     let items = try ArchiveService.topLevelItems(in: created)
@@ -1774,16 +1858,22 @@ final class FileBrowserViewModel: ObservableObject {
                     return
                 }
                 if conflicts.isEmpty {
-                    try await ArchiveService.moveExtractedItems(from: created, to: destination, overwrite: false)
+                    try await ArchiveService.moveExtractedItems(from: created, to: destination, overwrite: false, approvals: [:])
                     await Task.detached { ArchiveService.removeStaging(created) }.value
                     staging = nil
                     guard generation == self.archiveOperationGeneration else { return }
                     self.isArchiveOperationPresented = false
                     await self.reload(selecting: nil)
                 } else {
+                    let approvals = try await ArchiveService.captureConflictApprovals(items: conflicts, in: destination)
+                    try Task.checkCancellation()
+                    guard generation == self.archiveOperationGeneration else {
+                        await Task.detached { ArchiveService.removeStaging(created) }.value
+                        return
+                    }
                     self.pendingArchiveExtraction = PendingArchiveExtraction(
                         staging: created, destinationDirectory: destination, items: items,
-                        conflicts: conflicts, archiveName: archive.lastPathComponent
+                        conflicts: conflicts, archiveName: archive.lastPathComponent, approvals: approvals
                     )
                     self.isArchiveOperationPresented = false
                     self.archiveConflictRequest = ArchiveConflictRequest(
