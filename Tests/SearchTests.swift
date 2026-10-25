@@ -64,12 +64,19 @@ extension FileOperationTests {
                 for try await _ in stream { }
             }
             while await probe.startedCount() < 1 { try await Task.sleep(nanoseconds: 1_000_000) }
+            let (activeStarted, activeFinished, _, _) = await probe.snapshot()
+            try expect(activeStarted > activeFinished, "metadata fixture finished before cancellation")
             let start = DispatchTime.now().uptimeNanoseconds
             consumer.cancel()
             _ = try? await consumer.value
-            try await Task.sleep(nanoseconds: 180_000_000)
-            let (started, finished, onMain) = await probe.snapshot()
-            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            await probe.waitUntilIdle()
+            // Observe quiescence without charging the observation task's wake-up
+            // delay to worker cancellation latency on busy CI runners.
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let (started, finished, onMain, lastFinished) = await probe.snapshot()
+            try expect(lastFinished >= start, "metadata worker completed before cancellation; invalid fixture")
+            let elapsed = Double(lastFinished - start) / 1_000_000
+            print("SEARCH_CANCELLATION worker_stop_ms=\(elapsed) started=\(started) finished=\(finished)")
             try expect(started == finished, "cancelled metadata workers are still active")
             try expect(started <= 6, "cancellation scheduled extra metadata work: \(started)")
             try expect(!onMain, "metadata work ran on the main thread")
@@ -280,12 +287,26 @@ private actor SearchMetadataProbe: FileSystemService {
     var started = 0
     var finished = 0
     var onMain = false
+    var lastFinished: UInt64 = 0
+    private var idleWaiter: CheckedContinuation<Void, Never>?
     func startedCount() -> Int { started }
-    func snapshot() -> (Int, Int, Bool) { (started, finished, onMain) }
+    func snapshot() -> (Int, Int, Bool, UInt64) { (started, finished, onMain, lastFinished) }
+    func waitUntilIdle() async {
+        guard started != finished else { return }
+        await withCheckedContinuation { idleWaiter = $0 }
+    }
     func fileItem(at url: URL, options: DirectoryListingOptions) async throws -> FileItem {
         started += 1
         onMain = onMain || Thread.isMainThread
-        defer { finished += 1 }
+        defer {
+            finished += 1
+            lastFinished = DispatchTime.now().uptimeNanoseconds
+            if started == finished {
+                let waiter = idleWaiter
+                idleWaiter = nil
+                waiter?.resume()
+            }
+        }
         try await Task.sleep(nanoseconds: 2_000_000_000)
         return try await LocalFileSystemService().fileItem(at: url, options: options)
     }

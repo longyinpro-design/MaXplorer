@@ -52,3 +52,9 @@ Under `/Volumes/yl/AgentData/build/issue45-transfer-20261025-2488124013db1b60`:
 - `real-plan-low-space-20261025`: production-source probe, commands, compile/test/image logs for actual preflight capacity.
 
 GitHub CI runs the complete core suite and real 10k/100k search checks on the pushed commit. The issue updates link the final commit and its completed CI run.
+
+## CI timing follow-up
+
+The first remote run built successfully and passed 157 core cases, but the cancellation probe failed because it included a fixed 180 ms observation sleep in its 200 ms latency assertion; the runner resumed that observer at 263 ms. The probe now timestamps actual metadata-worker completion and waits for worker drainage, then checks a separate quiescence window for unexpected scheduling. The cancellation requirement remains **less than 200 ms**, with started/finished worker accounting and the maximum-concurrency bound unchanged. Production code is unchanged by this follow-up. Remote acceptance is based on the subsequent completed CI run linked from each issue.
+
+Follow-up local checks: search/performance **13 PASS / 0 FAIL** (`file-operation-tests/20261025T020231-25653`, worker stop 0.042 ms); final fixture-validity assertions **1 PASS / 0 FAIL** (`file-operation-tests/20261025T020310-27061`, worker stop 0.027 ms). Both receipt directories use the main build root listed above.
