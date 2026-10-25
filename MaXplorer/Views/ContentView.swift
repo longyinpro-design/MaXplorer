@@ -114,7 +114,9 @@ private struct ActiveBrowserView: View {
                 model.cancelInfoLoad()
             }
         }
-        .sheet(isPresented: $model.isTransferPlanPresented) {
+        .sheet(isPresented: $model.isTransferPlanPresented, onDismiss: {
+            model.cancelTransferPlan()
+        }) {
             TransferPlanSheet(model: model)
         }
         .sheet(isPresented: $model.isArchiveOperationPresented) {
@@ -130,7 +132,7 @@ private struct ActiveBrowserView: View {
             BatchRenameSheet(model: model)
         }
         .confirmationDialog(
-            "解压时发现同名项目",
+            "目标位置存在同名项目",
             isPresented: Binding(
                 get: { model.archiveConflictRequest != nil },
                 set: { if !$0 { model.cancelArchiveConflictPrompt() } }
@@ -148,7 +150,11 @@ private struct ActiveBrowserView: View {
             }
         } message: {
             if let request = model.archiveConflictRequest {
-                Text("“\(request.archiveName)”中有 \(request.conflictCount) 个顶层项目与目标位置同名。")
+                if request.isCompression {
+                    Text("目标位置已有“\(request.archiveName)”。覆盖会替换现有压缩文件。")
+                } else {
+                    Text("“\(request.archiveName)”中有 \(request.conflictCount) 个顶层项目与目标位置同名。")
+                }
             }
         }
         .sheet(isPresented: $model.isConnectToServerPresented) {
@@ -1359,6 +1365,7 @@ private struct SearchToolbar: View {
                     proxy: model.searchFocusProxy
                 )
                 .frame(minWidth: 180, idealWidth: 300, maxWidth: .infinity)
+                .accessibilityLabel("搜索文件名")
 
                 if !model.searchQuery.isEmpty {
                     Button {
@@ -1370,6 +1377,7 @@ private struct SearchToolbar: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .modernTooltip("清除搜索")
+                    .accessibilityLabel("清除搜索")
                 }
             }
             .font(.system(size: 13, weight: .medium))
@@ -1386,6 +1394,7 @@ private struct SearchToolbar: View {
             .labelsHidden()
             .frame(width: 112)
             .modernTooltip(model.searchScope.description)
+            .accessibilityLabel("搜索范围")
 
             Picker("匹配", selection: $model.searchMode) {
                 ForEach(SearchMatchMode.allCases) { mode in
@@ -1395,6 +1404,15 @@ private struct SearchToolbar: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .frame(width: 88)
+            .accessibilityLabel("搜索匹配方式")
+
+            if model.isSearching {
+                Button("取消搜索") {
+                    model.cancelSearch()
+                }
+                .keyboardShortcut(.cancelAction)
+                .accessibilityHint("停止搜索并保留已找到的结果")
+            }
 
             ToolbarIconButton(systemName: "arrow.clockwise", help: "重新搜索") {
                 model.reload()
@@ -1431,17 +1449,20 @@ private struct SearchStatusView: View {
             } else if model.isSearching {
                 ProgressView()
                     .controlSize(.small)
-                Text("已扫描 \(model.searchScannedCount) 项")
+                Text("已扫描 \(model.searchScannedCount) 项，找到 \(model.displayedItems.count) 项")
             } else if hasQuery {
                 Text("\(model.displayedItems.count) 项")
-                if model.searchSkippedCount > 0 {
-                    Text("跳过 \(model.searchSkippedCount) 个目录")
-                        .foregroundStyle(.secondary)
-                }
             } else {
                 Text("按名称搜索当前文件夹或当前卷")
             }
+            if model.searchSkippedCount > 0 {
+                Text("跳过 \(model.searchSkippedCount) 项")
+                    .foregroundStyle(.secondary)
+                    .help("目录无法读取或项目元数据读取失败")
+            }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("searchStatus")
         .font(.caption)
         .monospacedDigit()
         .foregroundStyle(.secondary)
@@ -2181,6 +2202,14 @@ private struct FileTableView: View {
                 }
             }
             .contextMenu(forSelectionType: FileItem.ID.self) { selection in
+                Button("新建文件…") {
+                    model.showNewFile()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+                .disabled(!model.canCreateFolder)
+
+                Divider()
+
                 Button("打开") {
                     model.selectedItemIDs = selection
                     model.openSelected()
@@ -2213,12 +2242,13 @@ private struct FileTableView: View {
                     model.showInfoSelected()
                 }
                 .keyboardShortcut("i", modifiers: .command)
-                .disabled(selectedItem(for: selection) == nil)
+                .disabled(!hasLocalSelection(selection))
 
                 Button("复制副本") {
                     model.selectedItemIDs = selection
                     model.duplicateSelected()
                 }
+                .keyboardShortcut("d", modifiers: .command)
                 .disabled(!hasLocalSelection(selection))
 
                 Divider()
@@ -2241,12 +2271,14 @@ private struct FileTableView: View {
                     model.selectedItemIDs = selection
                     model.chooseDestination(for: .copy)
                 }
+                .keyboardShortcut("c", modifiers: [.command, .option, .shift])
                 .disabled(!hasLocalSelection(selection))
 
                 Button("移动到…") {
                     model.selectedItemIDs = selection
                     model.chooseDestination(for: .move)
                 }
+                .keyboardShortcut("m", modifiers: [.command, .option, .shift])
                 .disabled(!hasLocalSelection(selection))
 
                 Divider()
@@ -2262,6 +2294,18 @@ private struct FileTableView: View {
                     model.showCompressPanel(format: .tarGz)
                 }
                 .disabled(!canCompress(selection: selection))
+
+                Button("压缩为 TAR…") {
+                    model.selectedItemIDs = selection
+                    model.showCompressPanel(format: .tar)
+                }
+                .disabled(!canCompress(selection: selection))
+
+                Button("压缩为 GZIP…") {
+                    model.selectedItemIDs = selection
+                    model.showCompressPanel(format: .gzip)
+                }
+                .disabled(!canCompress(selection: selection, format: .gzip))
 
                 Button("解压…") {
                     model.selectedItemIDs = selection
@@ -2440,8 +2484,10 @@ private struct FileTableView: View {
         canCut(selection: selection)
     }
 
-    private func canCompress(selection: Set<FileItem.ID>) -> Bool {
+    private func canCompress(selection: Set<FileItem.ID>, format: ArchiveFormat = .zip) -> Bool {
         let items = model.items.filter { selection.contains($0.id) && !$0.isNetworkLocation }
+        guard items.count == selection.count else { return false }
+        if format == .gzip && (items.count != 1 || items.first?.isDirectory != false) { return false }
         guard let firstParent = items.first?.url.deletingLastPathComponent() else {
             return false
         }
@@ -3153,10 +3199,12 @@ private struct ArchiveProgressSheet: View {
                     Button("取消") {
                         model.cancelArchiveOperation()
                     }
+                    .keyboardShortcut(.cancelAction)
                 } else {
                     Button("关闭") {
                         model.dismissArchiveOperation()
                     }
+                    .keyboardShortcut(.defaultAction)
                 }
             }
         }
@@ -3182,8 +3230,13 @@ private struct TransferPlanSheet: View {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("正在计算文件数、大小和目标空间…")
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("正在计算文件数、大小和目标空间…")
+                            Text("已扫描 \(model.transferPlanScannedCount) 项 · \(byteText(model.transferPlanScannedBytes))")
+                                .monospacedDigit()
+                        }
+                        .foregroundStyle(.secondary)
+                        .accessibilityElement(children: .combine)
                     }
                 }
             } else if let plan = model.transferPlan {
@@ -3193,7 +3246,7 @@ private struct TransferPlanSheet: View {
                     planRow("项目", "\(plan.itemCount) 项")
                     planRow("总大小", byteText(plan.totalBytes))
                     planRow("所需空间", plan.requiredBytes == 0 ? "不需要额外空间" : byteText(plan.requiredBytes))
-                    planRow("可用空间", plan.freeBytes.map(byteText) ?? "未知（网络卷）")
+                    planRow("可用空间", plan.freeBytes.map(byteText) ?? "未知")
                     planRow("冲突", plan.conflictCount == 0 ? "无" : "\(plan.conflictCount) 项")
                     planRow("权限", permissionText(plan))
                     if plan.isNetworkDestination {
@@ -3201,6 +3254,11 @@ private struct TransferPlanSheet: View {
                     }
                 }
 
+                if plan.freeBytes == nil {
+                    Label("无法获取目标可用容量。可继续传输，执行时仍会检查并报告空间不足。", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
                 if !plan.hasEnoughSpace {
                     Label("目标空间不足，无法开始传输。", systemImage: "exclamationmark.triangle")
                         .font(.footnote)
@@ -3223,11 +3281,13 @@ private struct TransferPlanSheet: View {
                 Button("取消") {
                     model.cancelTransferPlan()
                 }
+                .keyboardShortcut(.cancelAction)
                 Button("开始传输") {
                     model.confirmTransferPlan()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!(model.transferPlan?.canProceed ?? false))
+                .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
@@ -3283,7 +3343,9 @@ private struct NewFileSheet: View {
             HStack {
                 Spacer()
                 Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("新建", action: create)
+                    .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .disabled(trimmedName.isEmpty)
             }
@@ -3309,9 +3371,10 @@ private struct FileInfoSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+                Image(systemName: item.isDirectory ? "folder" : "doc")
                     .resizable()
-                    .interpolation(.high)
+                    .scaledToFit()
+                    .accessibilityHidden(true)
                     .frame(width: 44, height: 44)
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -3334,12 +3397,28 @@ private struct FileInfoSheet: View {
 
             Divider()
 
+            if model.infoItems.count > 1 {
+                Picker("所选项目（\(model.infoItems.count) 项）", selection: Binding(
+                    get: { item.id },
+                    set: { id in
+                        guard let selected = model.infoItems.first(where: { $0.id == id }) else { return }
+                        model.showInfo(for: selected)
+                    }
+                )) {
+                    ForEach(model.infoItems) { selected in
+                        Text(selected.name).tag(selected.id)
+                    }
+                }
+                .accessibilityLabel("切换所选项目的简介")
+            }
+
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
                 infoRow("类型", item.displayKind)
                 infoRow("大小", sizeText)
                 infoRow("位置", item.url.deletingLastPathComponent().path)
                 infoRow("创建", dateText(model.infoDetails?.createdAt ?? item.createdAt))
                 infoRow("修改", dateText(model.infoDetails?.modifiedAt ?? item.modifiedAt))
+                infoRow("拍摄", dateText(model.infoDetails?.dateTaken ?? item.dateTaken))
                 infoRow("所有者", model.infoDetails?.owner ?? item.owner ?? "—")
                 infoRow("群组", model.infoDetails?.group ?? "—")
                 infoRow("权限", model.infoDetails?.permissions ?? "—")
@@ -3364,10 +3443,12 @@ private struct FileInfoSheet: View {
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
         .frame(width: 560)
+        .onChange(of: item.id) { _, _ in copiedPath = false }
     }
 
     @ViewBuilder
@@ -3446,7 +3527,9 @@ private struct SelectItemsSheet: View {
             HStack {
                 Spacer()
                 Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("选择", action: onSelect)
+                    .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .disabled(trimmedPattern.isEmpty)
             }

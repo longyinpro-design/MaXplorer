@@ -3,6 +3,8 @@ import Foundation
 nonisolated enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
     case zip
     case tarGz
+    case tar
+    case gzip
 
     var id: String { rawValue }
 
@@ -10,6 +12,8 @@ nonisolated enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .zip: return "ZIP"
         case .tarGz: return "TAR.GZ"
+        case .tar: return "TAR"
+        case .gzip: return "GZIP（单个文件）"
         }
     }
 
@@ -17,6 +21,8 @@ nonisolated enum ArchiveFormat: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .zip: return "zip"
         case .tarGz: return "tar.gz"
+        case .tar: return "tar"
+        case .gzip: return "gz"
         }
     }
 }
@@ -59,8 +65,10 @@ nonisolated struct ArchiveService {
     static func compress(
         items: [URL],
         to destination: URL,
-        format: ArchiveFormat
+        format: ArchiveFormat,
+        overwrite: Bool = false
     ) async throws {
+        try Task.checkCancellation()
         guard let parent = items.first?.deletingLastPathComponent() else {
             throw ArchiveError.unsupportedArchive
         }
@@ -70,6 +78,14 @@ nonisolated struct ArchiveService {
         }
         for item in items where item.lastPathComponent.hasPrefix("-") {
             throw ArchiveError.invalidItemName(item.lastPathComponent)
+        }
+
+        if format == .gzip {
+            guard items.count == 1,
+                  try items[0].resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]).isRegularFile == true,
+                  try items[0].resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
+                throw ArchiveError.commandFailed("GZIP 只能压缩一个普通文件；多个项目或文件夹请使用 TAR.GZ。")
+            }
         }
 
         let staging = try makeStagingDirectory(in: destination.deletingLastPathComponent())
@@ -84,13 +100,19 @@ nonisolated struct ArchiveService {
                 arguments: ["-q", "-r", "-y", temporaryArchive.path] + names,
                 currentDirectory: standardizedParent
             )
-        case .tarGz:
+        case .tarGz, .tar:
             try await run(
                 "/usr/bin/tar",
-                arguments: ["-czf", temporaryArchive.path, "-C", standardizedParent.path, "--"] + names
+                arguments: [format == .tarGz ? "-czf" : "-cf", temporaryArchive.path, "-C", standardizedParent.path, "--"] + names
             )
+        case .gzip:
+            guard FileManager.default.createFile(atPath: temporaryArchive.path, contents: Data()) else {
+                throw ArchiveError.stagingFailed("无法创建压缩输出文件。")
+            }
+            try await run("/usr/bin/gzip", arguments: ["-c", items[0].path], standardOutputURL: temporaryArchive)
         }
 
+        try Task.checkCancellation()
         guard FileManager.default.fileExists(atPath: temporaryArchive.path) else {
             throw ArchiveError.commandFailed("压缩工具没有生成输出文件。")
         }
@@ -99,7 +121,7 @@ nonisolated struct ArchiveService {
             .move,
             sourceURL: temporaryArchive,
             destinationURL: destination,
-            overwrite: true,
+            overwrite: overwrite,
             progress: { _ in }
         )
     }
@@ -108,6 +130,7 @@ nonisolated struct ArchiveService {
         archive: URL,
         toStagingIn destinationDirectory: URL
     ) async throws -> URL {
+        try Task.checkCancellation()
         guard let kind = extractionKind(for: archive) else {
             throw ArchiveError.unsupportedArchive
         }
@@ -117,12 +140,12 @@ nonisolated struct ArchiveService {
             switch kind {
             case .zip:
                 try await validateEntries(
-                    executable: "/usr/bin/zipinfo",
-                    arguments: ["-1", archive.path]
+                    executable: "/usr/bin/tar",
+                    arguments: ["-tf", archive.path]
                 )
                 try await run(
-                    "/usr/bin/ditto",
-                    arguments: ["-x", "-k", archive.path, staging.path]
+                    "/usr/bin/tar",
+                    arguments: ["-xf", archive.path, "-C", staging.path]
                 )
             case .tar:
                 try await validateEntries(
@@ -147,6 +170,7 @@ nonisolated struct ArchiveService {
                 )
             }
 
+            try Task.checkCancellation()
             try validateSymlinks(in: staging)
             return staging
         } catch {
@@ -269,20 +293,23 @@ nonisolated struct ArchiveService {
         let stagingRoot = staging.resolvingSymlinksInPath().standardizedFileURL
         let rootPrefix = stagingRoot.path.hasSuffix("/") ? stagingRoot.path : stagingRoot.path + "/"
 
+        var enumerationError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: staging,
             includingPropertiesForKeys: [.isSymbolicLinkKey],
-            options: []
+            options: [],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
         ) else {
-            return
+            throw ArchiveError.unsafeEntry(staging.lastPathComponent)
         }
 
         while let url = enumerator.nextObject() as? URL {
-            let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey])
-            guard values?.isSymbolicLink == true else { continue }
-            guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) else {
-                continue
-            }
+            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard values.isSymbolicLink == true else { continue }
+            let target = try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
             guard !target.hasPrefix("/") else {
                 throw ArchiveError.unsafeEntry(url.lastPathComponent)
             }
@@ -296,6 +323,7 @@ nonisolated struct ArchiveService {
                 throw ArchiveError.unsafeEntry(url.lastPathComponent)
             }
         }
+        if let enumerationError { throw enumerationError }
     }
 
     // MARK: - Process runner

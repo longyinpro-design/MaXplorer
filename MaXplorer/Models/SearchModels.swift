@@ -47,8 +47,13 @@ nonisolated enum SearchMatchMode: String, CaseIterable, Identifiable, Sendable {
         case .contains:
             return name.localizedCaseInsensitiveContains(query)
         case .glob:
-            return query.withCString { pattern in
-                name.withCString { candidate in
+            // fnmatch reads LC_CTYPE. A thread-local UTF-8 locale preserves its
+            // Unicode character boundaries and bracket-class definitions without
+            // changing the process locale or expanding ß/ﬃ/İ via full case folding.
+            let previous = uselocale(SearchGlobLocale.shared.value)
+            defer { uselocale(previous) }
+            return query.precomposedStringWithCanonicalMapping.withCString { pattern in
+                name.precomposedStringWithCanonicalMapping.withCString { candidate in
                     fnmatch(pattern, candidate, FNM_CASEFOLD) == 0
                 }
             }
@@ -70,4 +75,20 @@ nonisolated enum SearchEvent: Sendable {
     case batch([FileItem])
     case progress(SearchProgress)
     case finished(SearchSummary)
+}
+
+/// Darwin ships this UTF-8 locale. The immutable handle is shared, but uselocale
+/// changes only the calling thread and is restored before this synchronous match returns.
+private nonisolated final class SearchGlobLocale: @unchecked Sendable {
+    static let shared = SearchGlobLocale()
+    let value: locale_t
+
+    private init() {
+        guard let value = newlocale(LC_CTYPE_MASK, "en_US.UTF-8", nil) else {
+            preconditionFailure("Unable to create the macOS UTF-8 glob locale")
+        }
+        self.value = value
+    }
+
+    deinit { freelocale(value) }
 }

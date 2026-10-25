@@ -47,3 +47,8 @@ jobs:
         env:
           AGENT_BUILD_ROOT: ${{ runner.temp }}
         run: ./scripts/test-file-operations.sh
+
+      - name: Search performance (10k / 100k real files)
+        env:
+          AGENT_BUILD_ROOT: ${{ runner.temp }}
+        run: ./scripts/test-search-performance.sh

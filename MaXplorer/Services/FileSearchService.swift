@@ -56,6 +56,12 @@ nonisolated struct FileSearchService {
         fileSystem: any FileSystemService,
         continuation: AsyncThrowingStream<SearchEvent, Error>.Continuation
     ) async throws -> SearchSummary {
+        guard let rootValues = try? root.resourceValues(forKeys: [.isDirectoryKey]),
+            rootValues.isDirectory == true,
+            FileManager.default.isReadableFile(atPath: root.path) else {
+            throw SearchError.unreadableRoot(root)
+        }
+
         let keys: Set<URLResourceKey> = [
             .isDirectoryKey,
             .isPackageKey,
@@ -86,14 +92,18 @@ nonisolated struct FileSearchService {
         pendingURLs.reserveCapacity(128)
         var lastProgress = DispatchTime.now().uptimeNanoseconds
         var lastBatch = lastProgress
+        var hasPublishedResults = false
 
         func flush() async throws {
             guard !pendingURLs.isEmpty else { return }
             try Task.checkCancellation()
             let urls = pendingURLs
             pendingURLs.removeAll(keepingCapacity: true)
-            let items = await buildItems(urls: urls, fileSystem: fileSystem, options: options)
+            let (items, failedCount) = try await buildItems(urls: urls, fileSystem: fileSystem, options: options)
+            skippedCount += failedCount
+            try Task.checkCancellation()
             guard !items.isEmpty else { return }
+            hasPublishedResults = true
             continuation.yield(.batch(items))
             lastBatch = DispatchTime.now().uptimeNanoseconds
         }
@@ -118,8 +128,9 @@ nonisolated struct FileSearchService {
             }
 
             let now = DispatchTime.now().uptimeNanoseconds
-            if pendingURLs.count >= 512
-                || (pendingURLs.count >= 64 && now &- lastBatch >= 250_000_000) {
+            if (!hasPublishedResults && !pendingURLs.isEmpty)
+                || pendingURLs.count >= 512
+                || (!pendingURLs.isEmpty && now &- lastBatch >= 150_000_000) {
                 try await flush()
             }
             if now &- lastProgress >= 150_000_000 {
@@ -143,29 +154,46 @@ nonisolated struct FileSearchService {
         urls: [URL],
         fileSystem: any FileSystemService,
         options: DirectoryListingOptions
-    ) async -> [FileItem] {
+    ) async throws -> ([FileItem], Int) {
         var items: [FileItem] = []
         items.reserveCapacity(urls.count)
 
-        await withTaskGroup(of: FileItem?.self) { group in
+        var failedCount = 0
+        try await withThrowingTaskGroup(of: FileItem?.self) { group in
             var iterator = urls.makeIterator()
             let maximumConcurrency = 6
             for _ in 0..<min(maximumConcurrency, urls.count) {
                 guard let url = iterator.next() else { break }
-                group.addTask { try? await fileSystem.fileItem(at: url, options: options) }
+                group.addTask { try await readItem(url, fileSystem: fileSystem, options: options) }
             }
 
-            for await item in group {
+            for try await item in group {
+                try Task.checkCancellation()
                 if let item {
                     items.append(item)
+                } else {
+                    failedCount += 1
                 }
                 if let url = iterator.next() {
-                    group.addTask { try? await fileSystem.fileItem(at: url, options: options) }
+                    group.addTask { try await readItem(url, fileSystem: fileSystem, options: options) }
                 }
             }
         }
 
-        return items
+        return (items, failedCount)
+    }
+
+    private static func readItem(
+        _ url: URL, fileSystem: any FileSystemService, options: DirectoryListingOptions
+    ) async throws -> FileItem? {
+        try Task.checkCancellation()
+        do {
+            return try await fileSystem.fileItem(at: url, options: options)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return nil
+        }
     }
 }
 

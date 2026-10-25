@@ -336,17 +336,16 @@ final class CopyQueueViewModel: ObservableObject {
             return
         }
 
-        if let shouldOverwrite {
-            items[index].shouldOverwrite = shouldOverwrite
-        }
+        // Approval belongs to this attempt. A failed attempt may be retried
+        // after another writer has replaced the target, so never reuse it.
+        items[index].shouldOverwrite = shouldOverwrite ?? false
         guard resetForRetry(itemID) else { return }
         startAvailableCopies()
     }
 
     func retryNeedsOverwrite(_ itemID: CopyQueueItem.ID) -> Bool {
         guard let item = items.first(where: { $0.id == itemID }),
-              item.state.canRetry,
-              !item.shouldOverwrite else {
+              item.state.canRetry else {
             return false
         }
 
@@ -360,6 +359,9 @@ final class CopyQueueViewModel: ObservableObject {
         guard !failedIDs.isEmpty else { return }
 
         for itemID in failedIDs {
+            if let index = items.firstIndex(where: { $0.id == itemID }) {
+                items[index].shouldOverwrite = false
+            }
             _ = resetForRetry(itemID)
         }
         startAvailableCopies()
@@ -557,7 +559,9 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     private func appendToQueue(_ newItems: [CopyQueueItem]) {
-        if !hasActiveOperations {
+        // Failed/cancelled entries still belong to this progress cohort: a
+        // later retry must share the denominator with newly enqueued work.
+        if items.isEmpty {
             aggregateTotalItemCount = 0
             aggregateFinishedItemCount = 0
         }

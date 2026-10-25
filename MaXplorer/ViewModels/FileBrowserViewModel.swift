@@ -24,6 +24,7 @@ struct ArchiveConflictRequest: Identifiable, Equatable {
     let id = UUID()
     let archiveName: String
     let conflictCount: Int
+    var isCompression = false
 }
 
 enum ArchiveConflictResolution {
@@ -53,6 +54,7 @@ final class FileBrowserViewModel: ObservableObject {
     /// the table, status bar, and selection logic all read it on every render.
     @Published private(set) var displayedItems: [FileItem] = []
     @Published private(set) var isLoading = false
+    @Published private(set) var isCurrentDirectoryWritable = false
     @Published private(set) var loadsTagColors = false
     @Published private(set) var volumeStats: VolumeCapacityStats?
     @Published private(set) var errorMessage: String?
@@ -61,6 +63,8 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var isSelectPatternPresented = false
     @Published var isNewFilePresented = false
     @Published var infoItem: FileItem?
+    @Published private(set) var infoItems: [FileItem] = []
+    @Published private(set) var isPreparingDuplicates = false
     @Published private(set) var infoDetails: FileInfo?
     @Published private(set) var infoFolderSize: Int64?
     @Published private(set) var isInfoSizeLoading = false
@@ -69,6 +73,8 @@ final class FileBrowserViewModel: ObservableObject {
     @Published private(set) var transferPlan: TransferPlan?
     @Published private(set) var isPreparingTransferPlan = false
     @Published private(set) var transferPlanError: String?
+    @Published private(set) var transferPlanScannedCount = 0
+    @Published private(set) var transferPlanScannedBytes: Int64 = 0
     @Published var archiveConflictRequest: ArchiveConflictRequest?
     @Published var isArchiveOperationPresented = false
     @Published private(set) var archiveOperationTitle = ""
@@ -81,7 +87,7 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var filterText = "" {
         didSet {
             guard filterText != oldValue else { return }
-            scheduleDisplayUpdate(debounceMilliseconds: 150)
+            scheduleDisplayUpdate(debounceMilliseconds: 50)
         }
     }
     let filterFocusProxy = FilterFocusProxy()
@@ -177,10 +183,13 @@ final class FileBrowserViewModel: ObservableObject {
     private var searchGeneration = 0
     private var searchTask: Task<Void, Never>?
     private var infoTask: Task<Void, Never>?
+    private var duplicateTask: Task<Void, Never>?
     private var transferPlanTask: Task<Void, Never>?
     private var transferPlanGeneration = 0
     private var pendingTransfer: PendingTransfer?
     private var archiveOperationTask: Task<Void, Never>?
+    private var archiveOperationGeneration = 0
+    private var pendingArchiveCompression: PendingArchiveCompression?
     private var pendingArchiveExtraction: PendingArchiveExtraction?
     private var didScanRecoveryResidues = false
     private var isAwaitingLoadDisplay = false
@@ -221,6 +230,12 @@ final class FileBrowserViewModel: ObservableObject {
         let operation: ConflictSession.Operation
     }
 
+    private struct PendingArchiveCompression {
+        let items: [URL]
+        let destination: URL
+        let format: ArchiveFormat
+    }
+
     private struct PendingArchiveExtraction {
         let staging: URL
         let destinationDirectory: URL
@@ -256,6 +271,11 @@ final class FileBrowserViewModel: ObservableObject {
                     shouldOverwrite: shouldOverwrite,
                     batchID: batchID
                 )
+
+                if self.isSearchActive {
+                    self.scheduleSearch(debounceMilliseconds: 400)
+                    return
+                }
 
                 guard destinationURL.deletingLastPathComponent().standardizedFileURL == self.currentURL.standardizedFileURL else {
                     return
@@ -303,6 +323,7 @@ final class FileBrowserViewModel: ObservableObject {
         displayTask?.cancel()
         searchTask?.cancel()
         infoTask?.cancel()
+        duplicateTask?.cancel()
         transferPlanTask?.cancel()
         archiveOperationTask?.cancel()
         undoJournalObservation?.cancel()
@@ -356,7 +377,7 @@ final class FileBrowserViewModel: ObservableObject {
             }
 
             let displayed = await Task.detached(priority: .userInitiated) {
-                Self.displayedItems(
+                FileDisplayPipeline.displayedItems(
                     from: itemsSnapshot,
                     descriptor: descriptor,
                     query: query,
@@ -373,30 +394,6 @@ final class FileBrowserViewModel: ObservableObject {
                 self.isAwaitingLoadDisplay = false
                 self.isLoading = false
             }
-        }
-    }
-
-    nonisolated private static func displayedItems(
-        from items: [FileItem],
-        descriptor: FileSortDescriptor,
-        query: String,
-        showAliases: Bool
-    ) -> [FileItem] {
-        let sorted = FileSorter.sorted(items, by: descriptor)
-        guard !query.isEmpty || !showAliases else {
-            return sorted
-        }
-
-        return sorted.filter { item in
-            if !showAliases && item.isAlias {
-                return false
-            }
-
-            guard !query.isEmpty else {
-                return true
-            }
-
-            return item.name.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -419,11 +416,11 @@ final class FileBrowserViewModel: ObservableObject {
     var canGoBack: Bool { !isSearchActive && !backStack.isEmpty }
     var canGoForward: Bool { !isSearchActive && !forwardStack.isEmpty }
     var canGoUp: Bool { !isSearchActive && currentURL.isFileURL && currentURL.path != "/" }
-    var canCreateFolder: Bool { !isSearchActive && currentURL.isFileURL }
+    var canCreateFolder: Bool { !isSearchActive && currentURL.isFileURL && isCurrentDirectoryWritable }
     var canSearch: Bool { currentURL.isFileURL }
     var canCutSelectedItem: Bool { selectedItems.contains { !$0.isNetworkLocation } }
     var canCopySelectedItem: Bool { selectedItems.contains { !$0.isNetworkLocation } }
-    var canDuplicateSelected: Bool { selectedItems.contains { !$0.isNetworkLocation } }
+    var canDuplicateSelected: Bool { !isPreparingDuplicates && selectedItems.contains { !$0.isNetworkLocation } }
     var canShowInfo: Bool { selectedItem != nil }
     var canUndo: Bool { undoJournal.canUndo }
     var undoActionTitle: String? { undoJournal.undoActionTitle }
@@ -434,6 +431,10 @@ final class FileBrowserViewModel: ObservableObject {
         }
         return items.allSatisfy { $0.url.deletingLastPathComponent() == firstParent }
     }
+    func canCompress(format: ArchiveFormat) -> Bool {
+        canCompressSelected && (format != .gzip || (selectedItems.count == 1 && selectedItem?.isDirectory == false))
+    }
+
     var canExtractSelected: Bool {
         guard selectedItems.count == 1, let selectedItem, !selectedItem.isNetworkLocation else {
             return false
@@ -657,7 +658,9 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
-        guard let root = resolvedSearchRoot() else {
+        let root = await resolvedSearchRoot()
+        guard !Task.isCancelled, generation == searchGeneration, isSearchActive else { return }
+        guard let root else {
             isSearching = false
             isLoading = false
             searchErrorMessage = "当前搜索位置不可用。"
@@ -719,29 +722,19 @@ final class FileBrowserViewModel: ObservableObject {
         }
     }
 
-    private func resolvedSearchRoot() -> URL? {
+    private func resolvedSearchRoot() async -> URL? {
         guard let scopeRoot = searchScopeRoot, scopeRoot.isFileURL else { return nil }
-
-        switch searchScope {
-        case .currentFolder:
-            return scopeRoot
-        case .currentVolume:
-            return volumeRoot(for: scopeRoot)
-        }
-    }
-
-    private func volumeRoot(for url: URL) -> URL {
-        var info = statfs()
-        guard statfs(url.path, &info) == 0 else {
-            return URL(fileURLWithPath: "/", isDirectory: true)
-        }
-
-        let mountPoint = withUnsafePointer(to: &info.f_mntonname) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
-                String(cString: $0)
+        guard searchScope == .currentVolume else { return scopeRoot }
+        return await Task.detached(priority: .userInitiated) {
+            var info = statfs()
+            guard statfs(scopeRoot.path, &info) == 0 else { return nil as URL? }
+            let mountPoint = withUnsafePointer(to: &info.f_mntonname) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                    String(cString: $0)
+                }
             }
-        }
-        return URL(fileURLWithPath: mountPoint, isDirectory: true)
+            return URL(fileURLWithPath: mountPoint, isDirectory: true)
+        }.value
     }
 
     /// Updates which extra (slow) per-file metadata is fetched, reloading only
@@ -773,6 +766,7 @@ final class FileBrowserViewModel: ObservableObject {
         progressiveLoadItems.removeAll(keepingCapacity: true)
         lastProgressiveDisplayUptime = 0
         isLoading = true
+        isCurrentDirectoryWritable = false
         errorMessage = nil
         refreshVolumeStats()
         Task {
@@ -796,6 +790,11 @@ final class FileBrowserViewModel: ObservableObject {
                     return
                 }
 
+                let writable = await Task.detached(priority: .utility) {
+                    target.isFileURL && FileManager.default.isWritableFile(atPath: target.path)
+                }.value
+                guard generation == loadGeneration else { return }
+                isCurrentDirectoryWritable = writable
                 progressiveLoadItems.removeAll(keepingCapacity: false)
                 isAwaitingLoadDisplay = true
                 applyLoadedItems(loadedItems, selecting: itemID)
@@ -1115,44 +1114,41 @@ final class FileBrowserViewModel: ObservableObject {
     // MARK: - Item information
 
     func showInfoSelected() {
-        guard let selectedItem else { return }
-        showInfo(for: selectedItem)
+        infoItems = selectedItems.filter { !$0.isNetworkLocation }
+        guard let first = infoItems.first else { return }
+        showInfo(for: first)
     }
 
     func showInfo(for item: FileItem) {
         infoItem = item
         infoDetails = nil
-        infoFolderSize = item.isDirectory ? nil : item.size
-        isInfoSizeLoading = item.isDirectory
+        infoFolderSize = nil
+        isInfoSizeLoading = true
         infoError = nil
         infoTask?.cancel()
-
         infoTask = Task { [weak self] in
-            let details = await Self.loadFileInfo(for: item)
-            guard !Task.isCancelled, let self, self.infoItem?.id == item.id else { return }
-
-            if let details {
-                self.infoDetails = details
-            } else {
-                self.infoError = "无法读取项目信息。"
-            }
-
-            guard item.isDirectory else {
-                self.isInfoSizeLoading = false
-                return
-            }
-
             do {
-                let size = try await SafeFileOperations.totalByteCount(for: item.url)
-                guard !Task.isCancelled, self.infoItem?.id == item.id else { return }
-                self.infoFolderSize = size
+                let worker = Task.detached(priority: .userInitiated) {
+                    try await BasicFileActions.fileInfo(for: item)
+                }
+                let details = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                guard !Task.isCancelled, let self, self.infoItem?.id == item.id else { return }
+                self.infoDetails = details
+                if details.isDirectory {
+                    let size = try await SafeFileOperations.totalByteCount(for: item.url)
+                    guard !Task.isCancelled, self.infoItem?.id == item.id else { return }
+                    self.infoFolderSize = size
+                } else {
+                    self.infoFolderSize = details.size
+                }
+                self.isInfoSizeLoading = false
             } catch {
-                guard !Task.isCancelled, self.infoItem?.id == item.id else { return }
+                guard !Task.isCancelled, let self, self.infoItem?.id == item.id else { return }
                 self.infoError = error.localizedDescription
+                self.isInfoSizeLoading = false
             }
-
-            guard !Task.isCancelled else { return }
-            self.isInfoSizeLoading = false
         }
     }
 
@@ -1162,65 +1158,25 @@ final class FileBrowserViewModel: ObservableObject {
         isInfoSizeLoading = false
     }
 
-    nonisolated private static func loadFileInfo(for item: FileItem) async -> FileInfo? {
-        await Task.detached(priority: .userInitiated) {
-            let attributes = try? FileManager.default.attributesOfItem(atPath: item.url.path)
-            let permissions = (attributes?[.posixPermissions] as? NSNumber)
-                .map { String(format: "%03o", $0.intValue) }
-            let created = attributes?[.creationDate] as? Date
-            let modified = attributes?[.modificationDate] as? Date
-            let owner = attributes?[.ownerAccountName] as? String
-            let group = attributes?[.groupOwnerAccountName] as? String
-
-            return FileInfo(
-                name: item.name,
-                path: item.url.path,
-                kind: item.displayKind,
-                size: item.size,
-                createdAt: created ?? item.createdAt,
-                modifiedAt: modified ?? item.modifiedAt,
-                owner: owner ?? item.owner,
-                group: group,
-                permissions: permissions,
-                tagNames: FinderTagReader.tagNames(for: item.url),
-                isDirectory: item.isDirectory
-            )
-        }.value
-    }
-
     // MARK: - New file
 
     func showNewFile() {
-        guard !isSearchActive, currentURL.isFileURL else { return }
+        guard canCreateFolder else { return }
         isNewFilePresented = true
     }
 
     func createFile(named name: String) async {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard currentURL.isFileURL else { return }
-        guard !trimmedName.isEmpty,
-              !trimmedName.contains("/"),
-              trimmedName != ".",
-              trimmedName != ".." else {
-            errorMessage = "请输入有效文件名。"
-            return
-        }
-
-        let target = currentURL.appendingPathComponent(trimmedName)
+        guard canCreateFolder else { return }
+        let directory = currentURL
         do {
-            try await Task.detached(priority: .userInitiated) {
-                guard !FileManager.default.fileExists(atPath: target.path) else {
-                    throw FileSystemError.itemAlreadyExists(trimmedName)
-                }
-                guard FileManager.default.createFile(atPath: target.path, contents: Data()) else {
-                    throw NSError(
-                        domain: NSCocoaErrorDomain,
-                        code: NSFileWriteUnknownError,
-                        userInfo: [NSFilePathErrorKey: target.path]
-                    )
-                }
-            }.value
-            await reload(selecting: target)
+            let worker = Task.detached(priority: .userInitiated) {
+                try BasicFileActions.createEmptyFile(named: name, in: directory)
+            }
+            let target = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
+            if currentURL == directory { await reload(selecting: target) }
+        } catch is CancellationError {
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1229,32 +1185,25 @@ final class FileBrowserViewModel: ObservableObject {
     // MARK: - Duplicate / transfer to
 
     func duplicateSelected() {
+        guard canDuplicateSelected else { return }
         let items = selectedItems.filter { !$0.isNetworkLocation }
-        guard !items.isEmpty else { return }
-
-        let duplicates = items.map { item in
-            (source: item.url, destination: uniqueCopyDestination(for: item))
-        }
-        copyQueue.enqueueDuplicates(duplicates)
-    }
-
-    private func uniqueCopyDestination(for item: FileItem) -> URL {
-        let source = item.url
-        let directory = source.deletingLastPathComponent()
-        let extensionPart = item.isDirectory ? "" : source.pathExtension
-        let baseName = extensionPart.isEmpty
-            ? source.lastPathComponent
-            : source.deletingPathExtension().lastPathComponent
-        let suffix = extensionPart.isEmpty ? "" : ".\(extensionPart)"
-
-        var attempt = 1
-        while true {
-            let copySuffix = attempt == 1 ? " copy" : " copy \(attempt)"
-            let candidate = directory.appendingPathComponent(baseName + copySuffix + suffix)
-            if !SafeFileOperations.entryExists(at: candidate) {
-                return candidate
+        let reserved = Set(copyQueue.items.filter { $0.state.isActive }.map(\.destinationURL))
+        isPreparingDuplicates = true
+        duplicateTask = Task { [weak self] in
+            defer { self?.isPreparingDuplicates = false }
+            do {
+                let worker = Task.detached(priority: .userInitiated) {
+                    try BasicFileActions.duplicateDestinations(for: items, reserved: reserved)
+                }
+                let duplicates = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
+                guard !Task.isCancelled, let self else { return }
+                self.copyQueue.enqueueDuplicates(duplicates)
+            } catch is CancellationError {
+            } catch {
+                self?.errorMessage = error.localizedDescription
             }
-            attempt += 1
         }
     }
 
@@ -1599,7 +1548,7 @@ final class FileBrowserViewModel: ObservableObject {
     // MARK: - Archives
 
     func showCompressPanel(format: ArchiveFormat) {
-        guard canCompressSelected else {
+        guard canCompress(format: format) else {
             errorMessage = "请选择同一文件夹中的项目进行压缩。"
             return
         }
@@ -1617,7 +1566,9 @@ final class FileBrowserViewModel: ObservableObject {
         switch format {
         case .zip:
             panel.allowedContentTypes = [.zip]
-        case .tarGz:
+        case .tar:
+            panel.allowedContentTypes = [UTType(filenameExtension: "tar") ?? .data]
+        case .tarGz, .gzip:
             panel.allowedContentTypes = [UTType(filenameExtension: "gz") ?? .data]
         }
 
@@ -1658,12 +1609,15 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func cancelArchiveOperation() {
+        archiveOperationGeneration += 1
         archiveOperationTask?.cancel()
         archiveOperationTask = nil
         if let pendingArchiveExtraction {
-            ArchiveService.removeStaging(pendingArchiveExtraction.staging)
+            let staging = pendingArchiveExtraction.staging
+            Task.detached { ArchiveService.removeStaging(staging) }
         }
         pendingArchiveExtraction = nil
+        pendingArchiveCompression = nil
         archiveConflictRequest = nil
         isArchiveOperationPresented = false
         archiveOperationError = nil
@@ -1679,15 +1633,25 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     func resolveArchiveConflict(_ resolution: ArchiveConflictResolution) {
+        if let pending = pendingArchiveCompression {
+            pendingArchiveCompression = nil
+            archiveConflictRequest = nil
+            if resolution == .overwrite {
+                beginArchiveCompression(items: pending.items, destination: pending.destination,
+                                        format: pending.format, overwrite: true)
+            }
+            return
+        }
         guard let pending = pendingArchiveExtraction else { return }
         pendingArchiveExtraction = nil
         archiveConflictRequest = nil
-
         if resolution == .cancel {
-            ArchiveService.removeStaging(pending.staging)
+            Task.detached { ArchiveService.removeStaging(pending.staging) }
             return
         }
 
+        archiveOperationGeneration += 1
+        let generation = archiveOperationGeneration
         isArchiveOperationPresented = true
         archiveOperationTitle = "正在完成解压…"
         archiveOperationError = nil
@@ -1695,118 +1659,116 @@ final class FileBrowserViewModel: ObservableObject {
         archiveOperationTask = Task { [weak self] in
             do {
                 try await ArchiveService.moveExtractedItems(
-                    from: pending.staging,
-                    to: pending.destinationDirectory,
+                    from: pending.staging, to: pending.destinationDirectory,
                     overwrite: resolution == .overwrite
                 )
-                ArchiveService.removeStaging(pending.staging)
-                guard let self else { return }
-                await self.reload(selecting: nil)
+                await Task.detached { ArchiveService.removeStaging(pending.staging) }.value
+                guard let self, generation == self.archiveOperationGeneration else { return }
                 self.isArchiveOperationPresented = false
+                await self.reload(selecting: nil)
             } catch is CancellationError {
-                ArchiveService.removeStaging(pending.staging)
-                guard let self else { return }
+                await Task.detached { ArchiveService.removeStaging(pending.staging) }.value
+                guard let self, generation == self.archiveOperationGeneration else { return }
                 self.isArchiveOperationPresented = false
             } catch {
-                guard let self else {
-                    ArchiveService.removeStaging(pending.staging)
-                    return
-                }
+                guard let self, generation == self.archiveOperationGeneration else { return }
                 self.archiveOperationError = "\(error.localizedDescription)\n临时目录保留在：\(pending.staging.path)"
                 self.isArchiveOperationPresented = true
             }
         }
     }
 
+    private func requestCompressionOverwrite(items: [URL], destination: URL, format: ArchiveFormat) {
+        pendingArchiveCompression = PendingArchiveCompression(items: items, destination: destination, format: format)
+        isArchiveOperationPresented = false
+        archiveConflictRequest = ArchiveConflictRequest(
+            archiveName: destination.lastPathComponent, conflictCount: 1, isCompression: true
+        )
+    }
+
     private func beginArchiveCompression(
-        items: [URL],
-        destination: URL,
-        format: ArchiveFormat
+        items: [URL], destination: URL, format: ArchiveFormat, overwrite: Bool = false
     ) {
-        archiveOperationTask?.cancel()
+        cancelArchiveOperation()
+        let generation = archiveOperationGeneration
         isArchiveOperationPresented = true
         archiveOperationTitle = "正在压缩…"
-        archiveOperationError = nil
-
         archiveOperationTask = Task { [weak self] in
             do {
-                try await ArchiveService.compress(items: items, to: destination, format: format)
-                guard let self else { return }
-                await self.reload(selecting: destination)
+                if !overwrite {
+                    let exists = await Task.detached { SafeFileOperations.entryExists(at: destination) }.value
+                    guard !Task.isCancelled, let self, generation == self.archiveOperationGeneration else { return }
+                    if exists {
+                        self.requestCompressionOverwrite(items: items, destination: destination, format: format)
+                        return
+                    }
+                }
+                try await ArchiveService.compress(items: items, to: destination, format: format, overwrite: overwrite)
+                guard !Task.isCancelled, let self, generation == self.archiveOperationGeneration else { return }
                 self.isArchiveOperationPresented = false
+                await self.reload(selecting: destination)
             } catch is CancellationError {
-                guard let self else { return }
+                guard let self, generation == self.archiveOperationGeneration else { return }
                 self.isArchiveOperationPresented = false
             } catch {
-                guard let self else { return }
-                self.archiveOperationError = error.localizedDescription
-                self.isArchiveOperationPresented = true
+                guard let self, generation == self.archiveOperationGeneration else { return }
+                let cocoa = error as NSError
+                if !overwrite && cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSFileWriteFileExistsError {
+                    self.requestCompressionOverwrite(items: items, destination: destination, format: format)
+                } else {
+                    self.archiveOperationError = error.localizedDescription
+                    self.isArchiveOperationPresented = true
+                }
             }
         }
     }
 
     private func beginArchiveExtraction(archive: URL, destination: URL) {
-        archiveOperationTask?.cancel()
+        cancelArchiveOperation()
+        let generation = archiveOperationGeneration
         isArchiveOperationPresented = true
         archiveOperationTitle = "正在解压…"
-        archiveOperationError = nil
-
         archiveOperationTask = Task { [weak self] in
             var staging: URL?
             do {
-                let created = try await ArchiveService.extract(
-                    archive: archive,
-                    toStagingIn: destination
-                )
+                let created = try await ArchiveService.extract(archive: archive, toStagingIn: destination)
                 staging = created
-                let items = try ArchiveService.topLevelItems(in: created)
-                guard !items.isEmpty else {
-                    throw ArchiveError.commandFailed("压缩包为空。")
-                }
-                let conflicts = ArchiveService.conflicts(items: items, in: destination)
-                guard let self else {
-                    ArchiveService.removeStaging(created)
+                let (items, conflicts) = try await Task.detached(priority: .utility) {
+                    let items = try ArchiveService.topLevelItems(in: created)
+                    return (items, ArchiveService.conflicts(items: items, in: destination))
+                }.value
+                try Task.checkCancellation()
+                guard let self, generation == self.archiveOperationGeneration else {
+                    await Task.detached { ArchiveService.removeStaging(created) }.value
                     return
                 }
-
                 if conflicts.isEmpty {
-                    try await ArchiveService.moveExtractedItems(
-                        from: created,
-                        to: destination,
-                        overwrite: false
-                    )
-                    ArchiveService.removeStaging(created)
+                    try await ArchiveService.moveExtractedItems(from: created, to: destination, overwrite: false)
+                    await Task.detached { ArchiveService.removeStaging(created) }.value
                     staging = nil
-                    await self.reload(selecting: nil)
+                    guard generation == self.archiveOperationGeneration else { return }
                     self.isArchiveOperationPresented = false
+                    await self.reload(selecting: nil)
                 } else {
                     self.pendingArchiveExtraction = PendingArchiveExtraction(
-                        staging: created,
-                        destinationDirectory: destination,
-                        items: items,
-                        conflicts: conflicts,
-                        archiveName: archive.lastPathComponent
+                        staging: created, destinationDirectory: destination, items: items,
+                        conflicts: conflicts, archiveName: archive.lastPathComponent
                     )
                     self.isArchiveOperationPresented = false
                     self.archiveConflictRequest = ArchiveConflictRequest(
-                        archiveName: archive.lastPathComponent,
-                        conflictCount: conflicts.count
+                        archiveName: archive.lastPathComponent, conflictCount: conflicts.count
                     )
                 }
             } catch is CancellationError {
-                if let staging {
-                    ArchiveService.removeStaging(staging)
-                }
-                guard let self else { return }
+                if let staging { await Task.detached { ArchiveService.removeStaging(staging) }.value }
+                guard let self, generation == self.archiveOperationGeneration else { return }
                 self.isArchiveOperationPresented = false
             } catch {
-                guard let self else {
-                    if let staging {
-                        ArchiveService.removeStaging(staging)
-                    }
+                guard let self, generation == self.archiveOperationGeneration else {
+                    if let staging { await Task.detached { ArchiveService.removeStaging(staging) }.value }
                     return
                 }
-                if let staging, FileManager.default.fileExists(atPath: staging.path) {
+                if let staging {
                     self.archiveOperationError = "\(error.localizedDescription)\n临时目录保留在：\(staging.path)"
                 } else {
                     self.archiveOperationError = error.localizedDescription
@@ -1819,8 +1781,9 @@ final class FileBrowserViewModel: ObservableObject {
     private func defaultArchiveName(for items: [URL], format: ArchiveFormat) -> String {
         let baseName: String
         if items.count == 1, let item = items.first {
-            let isDirectory = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            baseName = isDirectory ? item.lastPathComponent : item.deletingPathExtension().lastPathComponent
+            let isDirectory = selectedItems.first(where: { $0.url == item })?.isDirectory == true
+            // GZIP has no member table: preserve the original extension in its filename.
+            baseName = (isDirectory || format == .gzip) ? item.lastPathComponent : item.deletingPathExtension().lastPathComponent
         } else {
             baseName = "Archive"
         }
@@ -2068,12 +2031,26 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func beginConflictResolution(sources: [URL], to destinationDirectory: URL, operation: ConflictSession.Operation) {
-        if shouldShowTransferPlan(for: sources) {
-            prepareTransferPlan(sources: sources, to: destinationDirectory, operation: operation)
-            return
+        cancelTransferPlan()
+        conflictPreparationGeneration += 1
+        conflictSession = nil
+        copyConflictRequest = nil
+        let generation = transferPlanGeneration
+        transferPlanTask = Task { [weak self] in
+            let worker = Task.detached(priority: .utility) {
+                TransferPlanService.shouldShowPlan(for: sources)
+                    || sources.contains { SafeFileOperations.entryExists(at: destinationDirectory.appendingPathComponent($0.lastPathComponent)) }
+            }
+            let showPlan = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: { worker.cancel() }
+            guard !Task.isCancelled, let self, generation == self.transferPlanGeneration else { return }
+            if showPlan {
+                self.prepareTransferPlan(sources: sources, to: destinationDirectory, operation: operation)
+            } else {
+                self.startConflictResolution(sources: sources, to: destinationDirectory, operation: operation)
+            }
         }
-
-        startConflictResolution(sources: sources, to: destinationDirectory, operation: operation)
     }
 
     private func startConflictResolution(sources: [URL], to destinationDirectory: URL, operation: ConflictSession.Operation) {
@@ -2135,10 +2112,6 @@ final class FileBrowserViewModel: ObservableObject {
         pendingTransfer = nil
     }
 
-    private func shouldShowTransferPlan(for sources: [URL]) -> Bool {
-        TransferPlanService.shouldShowPlan(for: sources)
-    }
-
     private func prepareTransferPlan(
         sources: [URL],
         to destinationDirectory: URL,
@@ -2154,6 +2127,8 @@ final class FileBrowserViewModel: ObservableObject {
         )
         transferPlan = nil
         transferPlanError = nil
+        transferPlanScannedCount = 0
+        transferPlanScannedBytes = 0
         isPreparingTransferPlan = true
         isTransferPlanPresented = true
 
@@ -2168,13 +2143,23 @@ final class FileBrowserViewModel: ObservableObject {
 
         transferPlanTask = Task { [weak self] in
             do {
-                let plan = try await Task.detached(priority: .utility) {
+                let worker = Task.detached(priority: .utility) { [weak self] in
                     try await TransferPlanService.makePlan(
-                        sources: sources,
-                        destinationDirectory: destinationDirectory,
-                        operation: displayOperation
+                        sources: sources, destinationDirectory: destinationDirectory,
+                        operation: displayOperation,
+                        progress: { [weak self] count, bytes in
+                            Task { @MainActor [weak self] in
+                                guard let self, generation == self.transferPlanGeneration,
+                                      self.isPreparingTransferPlan else { return }
+                                self.transferPlanScannedCount = count
+                                self.transferPlanScannedBytes = bytes
+                            }
+                        }
                     )
-                }.value
+                }
+                let plan = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: { worker.cancel() }
 
                 guard let self, generation == self.transferPlanGeneration else { return }
                 self.transferPlan = plan

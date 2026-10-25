@@ -2,6 +2,7 @@ import Foundation
 
 extension FileOperationTests {
     static func archiveTests() async {
+        await archiveAcceptanceTests()
         await test("zip compression and extraction round-trip") { dir in
             let source = try directory(dir, "source")
             _ = try file(source, "one.txt", "one")
@@ -197,6 +198,203 @@ extension FileOperationTests {
             }
 
             try expectNoArchiveStaging(in: dir)
+        }
+    }
+
+    static func archiveAcceptanceTests() async {
+        await test("archive formats preserve Unicode nested and empty directories") { dir in
+            let source = try directory(dir, "源 文件夹")
+            _ = try file(source, "中文 空格.txt", "archive contents")
+            _ = try directory(source, "空目录")
+            for format in [ArchiveFormat.zip, .tar, .tarGz] {
+                let archive = dir.appendingPathComponent("roundtrip.\(format.fileExtension)")
+                try await ArchiveService.compress(items: [source], to: archive, format: format)
+                try runTool("/usr/bin/tar", ["-tf", archive.path])
+                let target = try directory(dir, "target-\(format.rawValue)")
+                let staging = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+                defer { ArchiveService.removeStaging(staging) }
+                try expect(contents(staging.appendingPathComponent("源 文件夹/中文 空格.txt")) == "archive contents", "Unicode contents mismatch")
+                var isDirectory: ObjCBool = false
+                try expect(fm.fileExists(atPath: staging.appendingPathComponent("源 文件夹/空目录").path, isDirectory: &isDirectory) && isDirectory.boolValue, "empty directory missing")
+            }
+        }
+        await test("gzip compression round-trip and unsupported multiple items") { dir in
+            let source = try file(dir, "中文 空格.txt", "gzip data")
+            let archive = dir.appendingPathComponent("中文 空格.txt.gz")
+            try await ArchiveService.compress(items: [source], to: archive, format: .gzip)
+            try runTool("/usr/bin/gzip", ["-t", archive.path])
+            let target = try directory(dir, "target")
+            let staging = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+            defer { ArchiveService.removeStaging(staging) }
+            try expect(contents(staging.appendingPathComponent(source.lastPathComponent)) == "gzip data", "gzip content mismatch")
+            ArchiveService.removeStaging(staging)
+            do {
+                try await ArchiveService.compress(items: [source, source], to: archive, format: .gzip)
+                throw TestFailure.assertion("multiple files accepted for gzip")
+            } catch is ArchiveError { }
+            try expectNoArchiveStaging(in: dir)
+        }
+        await test("empty zip and tar extract successfully") { dir in
+            try runTool("/usr/bin/python3", ["-c", "import sys,zipfile,tarfile; zipfile.ZipFile(sys.argv[1], 'w').close(); tarfile.open(sys.argv[2], 'w').close()", dir.appendingPathComponent("empty.zip").path, dir.appendingPathComponent("empty.tar").path])
+            let target = try directory(dir, "target")
+            for name in ["empty.zip", "empty.tar"] {
+                let staging = try await ArchiveService.extract(archive: dir.appendingPathComponent(name), toStagingIn: target)
+                let entries = try ArchiveService.topLevelItems(in: staging)
+                try expect(entries.isEmpty, "empty archive has entries")
+                ArchiveService.removeStaging(staging)
+            }
+            try expectNoArchiveStaging(in: dir)
+        }
+        await test("bzip2 and tar bzip aliases extract system-generated archives") { dir in
+            let source = try file(dir, "中文.txt", "bzip data")
+            let archive = dir.appendingPathComponent("中文.txt.bz2")
+            try runTool("/usr/bin/bzip2", ["-c", source.path], standardOutput: archive)
+            let target = try directory(dir, "target")
+            let staging = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+            try expect(contents(staging.appendingPathComponent("中文.txt")) == "bzip data", "bzip2 mismatch")
+            ArchiveService.removeStaging(staging)
+            for suffix in ["tar.bz2", "tbz", "tbz2", "tgz"] {
+                let archive = dir.appendingPathComponent("source.\(suffix)")
+                try runTool("/usr/bin/tar", [suffix == "tgz" ? "-czf" : "-cjf", archive.path, "-C", dir.path, "中文.txt"])
+                let staging = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+                try expect(contents(staging.appendingPathComponent("中文.txt")) == "bzip data", "tar alias mismatch")
+                ArchiveService.removeStaging(staging)
+            }
+        }
+        await test("zip and tar absolute paths traversal and escaping links are rejected") { dir in
+            let outside = try directory(dir, "outside")
+            let sentinel = try file(outside, "sentinel", "original")
+            let target = try directory(dir, "target")
+            let script = """
+            import io,sys,tarfile,zipfile,stat
+            kind,path,mode,outside=sys.argv[1:]
+            entries = [("../outside/sentinel", b"bad", None)] if mode=="dotdot" else [(outside+"/sentinel", b"bad", None)] if mode=="absolute" else [("link", b"", outside), ("link/sentinel", b"bad", None)]
+            if kind=="zip":
+                with zipfile.ZipFile(path,"w") as a:
+                    for name,data,link in entries:
+                        if link:
+                            i=zipfile.ZipInfo(name); i.create_system=3; i.external_attr=(stat.S_IFLNK|0o777)<<16; a.writestr(i,link)
+                        else: a.writestr(name,data)
+            else:
+                with tarfile.open(path,"w") as a:
+                    for name,data,link in entries:
+                        i=tarfile.TarInfo(name)
+                        if link: i.type=tarfile.SYMTYPE; i.linkname=link; a.addfile(i)
+                        else: i.size=len(data); a.addfile(i,io.BytesIO(data))
+            """
+            for kind in ["zip", "tar"] {
+                for mode in ["dotdot", "absolute", "symlink"] {
+                    let archive = dir.appendingPathComponent("\(mode).\(kind)")
+                    try runTool("/usr/bin/python3", ["-c", script, kind, archive.path, mode, outside.path])
+                    do {
+                        let staging = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+                        ArchiveService.removeStaging(staging)
+                        throw TestFailure.assertion("unsafe archive accepted: \(kind)/\(mode)")
+                    } catch is ArchiveError { }
+                    try expect(contents(sentinel) == "original", "archive wrote outside staging")
+                    try expectNoArchiveStaging(in: dir)
+                }
+            }
+        }
+        await test("safe internal symlinks survive extraction") { dir in
+            let source = try directory(dir, "source")
+            _ = try file(source, "real.txt", "linked content")
+            try fm.createSymbolicLink(atPath: source.appendingPathComponent("link").path, withDestinationPath: "real.txt")
+            let target = try directory(dir, "target")
+            for format in [ArchiveFormat.zip, .tar] {
+                let archive = dir.appendingPathComponent("source.\(format.fileExtension)")
+                try await ArchiveService.compress(items: [source], to: archive, format: format)
+                let staging = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+                try expect(contents(staging.appendingPathComponent("source/link")) == "linked content", "safe link lost")
+                ArchiveService.removeStaging(staging)
+            }
+        }
+        await test("running large compression cancellation removes staging and preserves output") { dir in
+            let source = dir.appendingPathComponent("large.dat")
+            fm.createFile(atPath: source.path, contents: Data())
+            let handle = try FileHandle(forWritingTo: source)
+            try handle.truncate(atOffset: 512 * 1024 * 1024)
+            try handle.close()
+            let destination = try file(dir, "existing.gz", "original")
+            let task = Task { try await ArchiveService.compress(items: [source], to: destination, format: .gzip) }
+            for _ in 0..<500 {
+                let entries = try fm.contentsOfDirectory(atPath: dir.path)
+                if entries.contains(where: { $0.hasPrefix(".maxplorer-archive-") }) { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            try await Task.sleep(nanoseconds: 30_000_000)
+            let cancelledAt = Date()
+            task.cancel()
+            do { try await task.value; throw TestFailure.assertion("cancelled compression succeeded") }
+            catch is CancellationError { }
+            try expect(Date().timeIntervalSince(cancelledAt) < 3, "cancellation did not terminate child promptly")
+            try expect(contents(destination) == "original", "cancel replaced existing destination")
+            try expectNoArchiveStaging(in: dir)
+        }
+        await test("running large extraction cancellation terminates child and cleans staging") { dir in
+            let source = dir.appendingPathComponent("large.dat")
+            fm.createFile(atPath: source.path, contents: Data())
+            let handle = try FileHandle(forWritingTo: source)
+            try handle.truncate(atOffset: 512 * 1024 * 1024)
+            try handle.close()
+            let archive = dir.appendingPathComponent("large.dat.gz")
+            try runTool("/usr/bin/gzip", ["-c", source.path], standardOutput: archive)
+            let target = try directory(dir, "target")
+            let task = Task { try await ArchiveService.extract(archive: archive, toStagingIn: target) }
+            for _ in 0..<500 {
+                let entries = try fm.contentsOfDirectory(atPath: dir.path)
+                if entries.contains(where: { $0.hasPrefix(".maxplorer-archive-") }) { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            try await Task.sleep(nanoseconds: 30_000_000)
+            let cancelledAt = Date()
+            task.cancel()
+            do {
+                let staging = try await task.value
+                ArchiveService.removeStaging(staging)
+                throw TestFailure.assertion("cancelled extraction succeeded")
+            } catch is CancellationError { }
+            try expect(Date().timeIntervalSince(cancelledAt) < 3, "extraction child did not terminate promptly")
+            try expectNoArchiveStaging(in: dir)
+            let targetEntries = try fm.contentsOfDirectory(atPath: target.path)
+            try expect(targetEntries.isEmpty, "cancelled extraction published output")
+        }
+        await test("compression publication refuses unapproved conflict") { dir in
+            let source = try file(dir, "source.txt", "source")
+            let destination = try file(dir, "existing.zip", "original")
+            do {
+                try await ArchiveService.compress(items: [source], to: destination, format: .zip)
+                throw TestFailure.assertion("compression overwrote unapproved target")
+            } catch is TestFailure { throw TestFailure.assertion("compression overwrote unapproved target") }
+              catch { }
+            try expect(contents(destination) == "original", "unapproved target changed")
+            try expectNoArchiveStaging(in: dir)
+            try await ArchiveService.compress(items: [source], to: destination, format: .zip, overwrite: true)
+            try runTool("/usr/bin/tar", ["-tf", destination.path])
+            try expectNoArchiveStaging(in: dir)
+        }
+        await test("pre-cancelled extraction creates no staging") { dir in
+            let target = try directory(dir, "target")
+            let archive = try file(dir, "broken.zip", "broken")
+            let task = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                _ = try await ArchiveService.extract(archive: archive, toStagingIn: target)
+            }
+            do { try await task.value; throw TestFailure.assertion("cancel ignored") }
+            catch is CancellationError { }
+            try expectNoArchiveStaging(in: dir)
+        }
+        await test("unwritable compression target preserves source and cleans staging") { dir in
+            let source = try file(dir, "source.txt", "source")
+            let target = try directory(dir, "readonly")
+            try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: target.path)
+            defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path) }
+            do {
+                try await ArchiveService.compress(items: [source], to: target.appendingPathComponent("output.zip"), format: .zip)
+                throw TestFailure.assertion("readonly target accepted")
+            } catch is ArchiveError { }
+            try expect(contents(source) == "source", "source changed")
+            try expectNoArchiveStaging(in: target)
         }
     }
 

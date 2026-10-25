@@ -94,6 +94,7 @@ struct MaXplorerApp: App {
                 Button("新建文件…") {
                     model.showNewFile()
                 }
+                .keyboardShortcut("n", modifiers: [.command, .option])
                 .disabled(!model.canCreateFolder)
 
                 Divider()
@@ -113,6 +114,7 @@ struct MaXplorerApp: App {
                 Button("复制副本") {
                     model.duplicateSelected()
                 }
+                .keyboardShortcut("d", modifiers: .command)
                 .disabled(!model.canDuplicateSelected)
 
                 Button("显示简介") {
@@ -132,11 +134,13 @@ struct MaXplorerApp: App {
                 Button("复制到…") {
                     model.chooseDestination(for: .copy)
                 }
+                .keyboardShortcut("c", modifiers: [.command, .option, .shift])
                 .disabled(!model.canCopySelectedItem)
 
                 Button("移动到…") {
                     model.chooseDestination(for: .move)
                 }
+                .keyboardShortcut("m", modifiers: [.command, .option, .shift])
                 .disabled(!model.canCutSelectedItem)
 
                 Divider()
@@ -144,12 +148,22 @@ struct MaXplorerApp: App {
                 Button("压缩为 ZIP…") {
                     model.showCompressPanel(format: .zip)
                 }
-                .disabled(!model.canCompressSelected)
+                .disabled(!model.canCompress(format: .zip))
 
                 Button("压缩为 TAR.GZ…") {
                     model.showCompressPanel(format: .tarGz)
                 }
-                .disabled(!model.canCompressSelected)
+                .disabled(!model.canCompress(format: .tarGz))
+
+                Button("压缩为 TAR…") {
+                    model.showCompressPanel(format: .tar)
+                }
+                .disabled(!model.canCompress(format: .tar))
+
+                Button("压缩为 GZIP…") {
+                    model.showCompressPanel(format: .gzip)
+                }
+                .disabled(!model.canCompress(format: .gzip))
 
                 Button("解压…") {
                     model.showExtractPanel()
