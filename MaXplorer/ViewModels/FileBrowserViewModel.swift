@@ -4,12 +4,6 @@ import Darwin
 import AppKit
 import UniformTypeIdentifiers
 
-enum SelectionMode {
-    case single
-    case toggle
-    case range
-}
-
 /// What the main detail surface is currently showing. The file browser is the
 /// default; the others are transient surfaces reached from the sidebar.
 enum DetailDestination: Equatable {

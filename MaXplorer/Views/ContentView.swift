@@ -2510,7 +2510,6 @@ private struct FileTableView: View {
             in: RoundedRectangle(cornerRadius: 4)
         )
         .overlay { rowClickTarget(for: item) }
-        .draggable(item.url)
         .dropDestination(for: URL.self) { urls, _ in
             guard let dest = item.navigationURL else { return false }
             model.moveItems(urlsExpandingSelection(urls), to: dest)
@@ -2532,15 +2531,32 @@ private struct FileTableView: View {
     }
 
     private func rowClickTarget(for item: FileItem) -> some View {
-        TableCellClickTarget { mode in
-            model.select(item, mode: mode)
-        } onOpen: {
-            model.selectedItemIDs = [item.id]
-            model.openSelected()
-        } onLongPress: {
-            guard !item.isNetworkLocation else { return }
-            startRename(selection: [item.id])
-        }
+        TableCellClickTarget(
+            onSelect: { mode in
+                model.select(item, mode: mode)
+            },
+            onOpen: {
+                model.selectedItemIDs = [item.id]
+                model.openSelected()
+            },
+            onLongPress: {
+                guard !item.isNetworkLocation else { return }
+                startRename(selection: [item.id])
+            },
+            isSelected: model.selectedItemIDs.contains(item.id),
+            dragURLs: { dragURLs(for: item) }
+        )
+    }
+
+    /// Files to put on the drag pasteboard. Dragging one row of a multi-row
+    /// selection carries the whole selection, matching Finder's behavior.
+    private func dragURLs(for item: FileItem) -> [URL] {
+        guard item.url.isFileURL else { return [] }
+        guard model.selectedItemIDs.contains(item.id) else { return [item.url] }
+        let selected = model.displayedItems
+            .filter { model.selectedItemIDs.contains($0.id) && $0.url.isFileURL }
+            .map(\.url)
+        return selected.isEmpty ? [item.url] : selected
     }
 
     @ViewBuilder
@@ -2599,12 +2615,16 @@ private struct TableCellClickTarget: NSViewRepresentable {
     let onSelect: (SelectionMode) -> Void
     let onOpen: () -> Void
     let onLongPress: () -> Void
+    var isSelected = false
+    var dragURLs: () -> [URL] = { [] }
 
     func makeNSView(context: Context) -> TableCellClickTargetNSView {
         let view = TableCellClickTargetNSView()
         view.onSelect = onSelect
         view.onOpen = onOpen
         view.onLongPress = onLongPress
+        view.isSelected = isSelected
+        view.dragURLs = dragURLs
         return view
     }
 
@@ -2612,67 +2632,8 @@ private struct TableCellClickTarget: NSViewRepresentable {
         nsView.onSelect = onSelect
         nsView.onOpen = onOpen
         nsView.onLongPress = onLongPress
-    }
-}
-
-private final class TableCellClickTargetNSView: NSView {
-    var onSelect: (SelectionMode) -> Void = { _ in }
-    var onOpen: () -> Void = {}
-    var onLongPress: () -> Void = {}
-
-    private var longPressTimer: Timer?
-
-    override var acceptsFirstResponder: Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        // This overlay handles selection itself, so native table mouseDown never
-        // gets a chance to transfer focus away from a text field or terminal.
-        var ancestor = superview
-        while let view = ancestor {
-            if let table = view as? NSTableView {
-                window?.makeFirstResponder(table)
-                break
-            }
-            ancestor = view.superview
-        }
-
-        if event.modifierFlags.contains(.shift) {
-            onSelect(.range)
-        } else if event.modifierFlags.contains(.command) {
-            onSelect(.toggle)
-        } else {
-            onSelect(.single)
-        }
-
-        if event.clickCount >= 2 {
-            cancelLongPress()
-            onOpen()
-        } else if event.modifierFlags.intersection([.shift, .command]).isEmpty {
-            scheduleLongPress()
-        }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        cancelLongPress()
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        cancelLongPress()
-    }
-
-    deinit { longPressTimer?.invalidate() }
-
-    private func scheduleLongPress() {
-        longPressTimer?.invalidate()
-        longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
-            self?.longPressTimer = nil
-            self?.onLongPress()
-        }
-    }
-
-    private func cancelLongPress() {
-        longPressTimer?.invalidate()
-        longPressTimer = nil
+        nsView.isSelected = isSelected
+        nsView.dragURLs = dragURLs
     }
 }
 
