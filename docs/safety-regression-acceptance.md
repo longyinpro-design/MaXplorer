@@ -57,6 +57,19 @@ DMG SHA-256: `1af559efb63f223becf58b50fc15864bc6901e01311e213ae5962085e9a742a3`.
 
 The DMG is a local validation artifact with ad-hoc signing. It is not Developer ID signed or notarized; Gatekeeper first launch was not tested. No GitHub Release was published. CI status is recorded on the matching commit and issues after push, not assumed from local tests.
 
-Issues #1–#4 retain their unmet GUI/network conditions. #7 still requires real SMB disconnect/reconnect and exFAT coverage; injected errors and APFS/HFS+ do not substitute. #8 still requires the full interaction/VoiceOver matrix, final release notes/localization review and external release acceptance. The current capability cache only remembers unsupported swap results; successful-volume probe caching remains to complete separately.
+Issues #1–#4 retain their unmet GUI/network conditions. #7 still requires real SMB disconnect/reconnect and exFAT coverage; injected errors and APFS/HFS+ do not substitute. #8 still requires the full interaction/VoiceOver matrix, final release notes/localization review and external release acceptance. At the first delivery, the capability cache only remembered unsupported swap results; the follow-up below completes successful-volume caching.
 
 Historical receipt note: the 2026-10-25 exFAT log path in `issues-1-5-acceptance.md` is no longer present. The 2026-10-24 old-command failure log remains at `file-operation-tests/20261024T113505-81026/image.log`; this delivery adds the valid new-interface receipt above.
+
+## Capability-cache follow-up
+
+Following `aa3bab3fc09fb073934ec060388296416f60cbc0`, capability results now cache both support and lack of support, keyed by both components of the actual mounted filesystem `f_fsid`. A failed identity lookup is not cached. A real unsupported publication downgrades a prior success; a racing successful probe cannot overwrite a negative result. Concurrent first probes may duplicate; filesystem I/O is never held under the capability-cache lock.
+
+- 3 focused cache cases PASS: supported, unsupported probe, and cached success downgraded by a real publication error (error injected; file operations real).
+- Full local candidate regression/performance: **179 PASS / 0 FAIL**, receipt `file-operation-tests/20261025T022705-63721`.
+- Actual two-filesystem APFS matrix: **4 PASS / 0 FAIL**, receipt `file-operation-tests/20261025T022757-65861`; includes distinct-device cache separation and the original cross-volume operations. The private image was detached.
+- Actual application build with fault configuration disabled plus strict signature: **PASS**, receipt `app-validation/20261025T022731-64293`. Build-only used a fresh `safety-capability-20261025/DerivedData`, without launching the app.
+- Exact source/overlay hashes: `safety-capability-20261025/candidate.json`. Independent read-only review passed for the production/test changes and the added cross-volume fixture.
+- The universal Release DMG above belongs to the earlier `aa3bab3` candidate; this follow-up has its own Debug build and commit CI. It does not relabel that DMG as a newer build.
+
+The first delivery CI [40165453076](https://github.com/longyinpro-design/MaXplorer/actions/runs/40165453076) succeeded on `aa3bab3`: build, 174 core tests, 13 search/performance tests, 5 drag payload tests and 13 native seam tests. The follow-up's CI must be checked independently after push.

@@ -12,12 +12,27 @@ nonisolated enum SafeFileOperations {
     /// has no runtime/environment switch capable of enabling them.
     enum FailurePoint: Hashable {
         case copyData, publishPayload, rollbackBackup, restorePermissions
-        case cleanupStaging, cleanupBackup
+        case cleanupStaging, cleanupBackup, probeSwap, publishSwap
     }
 #if MAXPLORER_FAULT_TESTS
     private static let failureLock = NSLock()
     private static var injectedFailures: [FailurePoint: Int32] = [:]
     private static var observedFailures: Set<FailurePoint> = []
+    private static var swapProbeCount = 0
+
+    static func resetSwapCapabilitiesForTesting() {
+        capabilityLock.lock()
+        defer { capabilityLock.unlock() }
+        swapCapabilities = [:]
+        swapProbeCount = 0
+    }
+
+    static var swapProbeCountForTesting: Int {
+        capabilityLock.lock()
+        defer { capabilityLock.unlock() }
+        return swapProbeCount
+    }
+
 
     static func setFailuresForTesting(_ failures: [FailurePoint: Int32]) {
         failureLock.lock()
@@ -59,7 +74,7 @@ nonisolated enum SafeFileOperations {
 
     private static let mutationLock = NSLock()
     private static let capabilityLock = NSLock()
-    private static var swapUnsupportedVolumes = Set<String>()
+    private static var swapCapabilities: [String: Bool] = [:]
     private static let fallbackOverrideLock = NSLock()
     private static var forceSwapFallbackOverride = false
 
@@ -228,13 +243,10 @@ nonisolated enum SafeFileOperations {
                     guard renamed == 0 else { throw posix(errno, destination) }
                     published = true
                 } else if swapSupported {
-                    let renamed = renameatx_np(
-                        stagingHandle.fd,
-                        "payload",
-                        destinationParent.fd,
-                        destination.lastPathComponent,
-                        UInt32(RENAME_SWAP)
-                    )
+                    let renamed = systemCall(at: .publishSwap) {
+                        renameatx_np(stagingHandle.fd, "payload", destinationParent.fd,
+                                     destination.lastPathComponent, UInt32(RENAME_SWAP))
+                    }
                     if renamed == 0 {
                         published = true
                     } else {
@@ -332,32 +344,44 @@ nonisolated enum SafeFileOperations {
 
         let volume = volumeIdentifier(for: directory)
         capabilityLock.lock()
-        let isKnownUnsupported = swapUnsupportedVolumes.contains(volume)
+        let cached = volume.flatMap { swapCapabilities[$0] }
         capabilityLock.unlock()
-        if isKnownUnsupported { return false }
+        if let cached { return cached }
 
+#if MAXPLORER_FAULT_TESTS
+        capabilityLock.lock()
+        swapProbeCount += 1
+        capabilityLock.unlock()
+#endif
         guard let probe = try? makeSwapProbe(in: directory) else { return true }
         defer {
             close(probe.fd)
             try? FileManager.default.removeItem(at: probe.url)
         }
 
-        if renameatx_np(probe.fd, "a", probe.fd, "b", UInt32(RENAME_SWAP)) == 0 {
+        if systemCall(at: .probeSwap, {
+            renameatx_np(probe.fd, "a", probe.fd, "b", UInt32(RENAME_SWAP))
+        }) == 0 {
+            recordSwapCapability(true, volume: volume)
             return true
         }
         let code = errno
         guard isSwapUnsupported(code) else { return true }
-        markSwapUnsupported(volume: volume)
+        recordSwapCapability(false, volume: volume)
         return false
     }
 
     private static func markSwapUnsupported(at directory: URL) {
-        markSwapUnsupported(volume: volumeIdentifier(for: directory))
+        recordSwapCapability(false, volume: volumeIdentifier(for: directory))
     }
 
-    private static func markSwapUnsupported(volume: String) {
+    private static func recordSwapCapability(_ supported: Bool, volume: String?) {
+        guard let volume else { return }
         capabilityLock.lock()
-        swapUnsupportedVolumes.insert(volume)
+        // A real failed swap overrides a successful probe racing with it.
+        if !supported || swapCapabilities[volume] == nil {
+            swapCapabilities[volume] = supported
+        }
         capabilityLock.unlock()
     }
 
@@ -371,14 +395,13 @@ nonisolated enum SafeFileOperations {
         return forceSwapFallbackOverride
     }
 
-    private static func volumeIdentifier(for directory: URL) -> String {
+    private static func volumeIdentifier(for directory: URL) -> String? {
         var info = statfs()
-        guard statfs(directory.path, &info) == 0 else { return directory.path }
-        return withUnsafePointer(to: &info.f_mntonname) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
-                String(cString: $0)
-            }
-        }
+        guard statfs(directory.path, &info) == 0 else { return nil }
+        // A mount path can be reused for a different volume. Cache by the actual
+        // mounted filesystem identity; the publication syscall still validates
+        // capabilities and downgrades a cached success if the server changes.
+        return "\(info.f_fsid.val.0):\(info.f_fsid.val.1)"
     }
 
     private static func makeSwapProbe(in directory: URL) throws -> (url: URL, fd: Int32) {

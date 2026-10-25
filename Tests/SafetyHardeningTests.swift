@@ -3,6 +3,50 @@ import Darwin
 
 extension FileOperationTests {
     static func safetyHardeningTests() async {
+        for failProbe in [true, false] {
+            await test("swap capability caches unsupported result: probe=\(failProbe)") { dir in
+                SafeFileOperations.resetSwapCapabilitiesForTesting()
+                defer {
+                    SafeFileOperations.resetSwapCapabilitiesForTesting()
+                    SafeFileOperations.setFailuresForTesting([:])
+                }
+                let source = try file(dir, "source", "new")
+                if !failProbe {
+                    let warmup = try file(dir, "warmup", "old")
+                    try await copy(source, warmup)
+                }
+                let point: SafeFileOperations.FailurePoint = failProbe ? .probeSwap : .publishSwap
+                SafeFileOperations.setFailuresForTesting([point: ENOTSUP])
+                let first = try file(dir, "first", "old")
+                let second = try file(dir, "second", "old")
+                try await copy(source, first)
+                try expect(SafeFileOperations.observedFailureForTesting(point), "unsupported capability path was not exercised")
+                try expect(SafeFileOperations.swapProbeCountForTesting == 1, "unexpected repeat probe")
+                // If unsupported was not cached, this second overwrite would hit
+                // a failing swap rather than the already selected backup path.
+                SafeFileOperations.setFailuresForTesting([.publishSwap: EIO])
+                try await copy(source, second)
+                try expect(!SafeFileOperations.observedFailureForTesting(.publishSwap), "unsupported swap was retried")
+                try expect(SafeFileOperations.swapProbeCountForTesting == 1, "unsupported volume was probed again")
+                try expect(contents(first) == "new" && contents(second) == "new", "cached fallback lost data")
+                try expectNoTransferResidue(in: dir)
+            }
+        }
+
+        await test("swap capability caches a supported volume across overwrite operations") { dir in
+            SafeFileOperations.resetSwapCapabilitiesForTesting()
+            defer { SafeFileOperations.resetSwapCapabilitiesForTesting() }
+            let source = try file(dir, "source", "new")
+            let first = try file(dir, "first", "old")
+            let second = try file(dir, "second", "old")
+            try await copy(source, first)
+            try expect(SafeFileOperations.swapProbeCountForTesting == 1, "initial volume capability was not probed once")
+            try await copy(source, second)
+            try expect(SafeFileOperations.swapProbeCountForTesting == 1, "cached volume was probed again")
+            try expect(contents(first) == "new" && contents(second) == "new", "cached overwrite lost data")
+            try expectNoTransferResidue(in: dir)
+        }
+
         for operation in [CopyQueueOperation.copy, .move] {
             await test("fault injected publish failure rolls back old target: \(operation)") { dir in
                 let source = try file(dir, "source", "new")

@@ -335,6 +335,27 @@ extension FileOperationTests {
     }
 
     static func crossVolumeTests(_ volume: URL) async {
+        await test("cross-volume capability cache separates mounted filesystems") { dir in
+            let targetDir = try directory(volume, UUID().uuidString)
+            defer { try? fm.removeItem(at: targetDir) }
+            var sourceStat = stat(); var targetStat = stat()
+            try expect(lstat(dir.path, &sourceStat) == 0 && lstat(targetDir.path, &targetStat) == 0,
+                       "filesystem identity fixture unavailable")
+            try expect(sourceStat.st_dev != targetStat.st_dev, "test requires two mounted filesystems")
+            SafeFileOperations.resetSwapCapabilitiesForTesting()
+            defer { SafeFileOperations.resetSwapCapabilitiesForTesting() }
+            let source = try file(dir, "source", "new")
+            let local = try file(dir, "local", "old")
+            let remote = try file(targetDir, "target", "old")
+            try await copy(source, local)
+            try expect(SafeFileOperations.swapProbeCountForTesting == 1, "first filesystem not probed")
+            try await copy(source, remote)
+            try expect(SafeFileOperations.swapProbeCountForTesting == 2, "second filesystem reused another capability")
+            try await copy(source, remote)
+            try expect(SafeFileOperations.swapProbeCountForTesting == 2, "second filesystem capability not cached")
+            try expect(contents(local) == "new" && contents(remote) == "new", "cache changed overwrite content")
+            try expectNoTransferResidue(in: targetDir)
+        }
         await test("real cross-volume move preserves content and removes source") { dir in
             let targetDir = try directory(volume, UUID().uuidString)
             defer { try? fm.removeItem(at: targetDir) }

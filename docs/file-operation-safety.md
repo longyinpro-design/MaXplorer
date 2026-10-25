@@ -91,7 +91,7 @@ A compact local proof copy, including byte-level UI checks and the build log, is
 
 The safety engine implements the fallback and error paths below. Their presence does not establish real SMB/exFAT acceptance; see the later evidence and remaining limits.
 
-- **Volume capability probe:** `RENAME_SWAP` support is probed once per mount and cached. Unsupported volumes use a backup-based publish path instead of failing the overwrite.
+- **Volume capability probe:** `RENAME_SWAP` support is cached by mounted filesystem identity; simultaneous first probes may duplicate. Unsupported volumes use a backup-based publish path instead of failing the overwrite.
 - **Backup fallback:** the old destination is renamed to a private `.maxplorer-backup-*` name, the staged payload is published with `RENAME_EXCL`, and the backup is removed after the operation. If publishing fails, the old destination is renamed back. If rollback also fails, the failure reports the backup path instead of deleting data.
 - **ENOSPC:** staging copies check the destination free space before copying and report required/available bytes without modifying the old destination or source.
 - **Disconnect:** `ENOTCONN`, `ETIMEDOUT`, and `EHOSTDOWN` are reported as connection interruptions; the old destination and source remain unchanged and the queue can retry.
@@ -144,4 +144,4 @@ Command: `/Users/long/.local/bin/agent-storage run --project <worktree> -- scrip
 
 ## Current safety/regression evidence (2026-10-25)
 
-See [safety-regression-acceptance.md](safety-regression-acceptance.md) for stale recovery identity protection, first-copy-error preservation, 12 injected failure branches, 176 passing core/performance checks, real mid-copy ENOSPC, isolated drag tests and the local universal Release/DMG artifact. The capability cache still only records unsupported results. Real SMB/exFAT and GUI acceptance remain incomplete; do not infer support from injected errors or source inspection.
+See [safety-regression-acceptance.md](safety-regression-acceptance.md) for stale recovery identity protection, first-copy-error preservation, 12 injected failure branches, 176 passing core/performance checks, real mid-copy ENOSPC, isolated drag tests and the local universal Release/DMG artifact. The follow-up capability cache records both supported and unsupported results by mounted filesystem identity, and downgrades a cached success if actual publication reports unsupported. Real SMB/exFAT and GUI acceptance remain incomplete; do not infer support from injected errors or source inspection.
