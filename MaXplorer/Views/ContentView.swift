@@ -2879,6 +2879,7 @@ private struct FileInfoSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var copiedPath = false
     @State private var isPropertyEditorPresented = false
+    @State private var isCloudStatusPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -2950,6 +2951,7 @@ private struct FileInfoSheet: View {
                 }
 
                 Button("编辑权限与标签…") { isPropertyEditorPresented = true }
+                Button("云端状态…") { isCloudStatusPresented = true }
 
                 Spacer()
 
@@ -2967,6 +2969,9 @@ private struct FileInfoSheet: View {
             FilePropertyEditorView(urls: (model.infoItems.isEmpty ? [item] : model.infoItems).map(\.url)) {
                 model.showInfo(for: item)
             }
+        }
+        .sheet(isPresented: $isCloudStatusPresented) {
+            CloudFileStatusView(urls: (model.infoItems.isEmpty ? [item] : model.infoItems).map(\.url))
         }
     }
 
