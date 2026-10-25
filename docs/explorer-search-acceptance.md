@@ -35,3 +35,11 @@ Probe receipt: `/Volumes/yl/AgentData/build/spotlight-service-20261026-2e766bcd3
 ## Remaining acceptance
 
 Positive system-index matching remains NOT_PROVEN and requires a writable indexed private fixture location. Isolated GUI remains NOT_RUN for controls, keyboard/VoiceOver and result interactions. The unchanged filename 10k/100k benchmarks do not establish content-index coverage or new filter UI performance. Issue #12 remains open for these criteria. The candidate export excludes historical AppSettings/ContentView dirty changes; CI and final independent-review results are recorded against the resulting candidate/commit after they complete.
+
+## CI performance configuration correction
+
+Commit `6afc8684f49ba99bd6499cc8d0b9ffa8b2a68612`, CI run `40168122929` attempt 1: build and 254 core tests passed. The unoptimized standalone performance executable failed the unchanged 100 ms 10k filter budget at 121.05 ms; the 100k scan passed (first 19.71 ms, total 5307.26 ms). Drag/thumbnail steps were skipped after that failure. A similar unoptimized timing failure was recorded for #11; it is retained rather than represented as a green run.
+
+The dedicated performance entry point now explicitly requests `-O`, while the ordinary safety suite keeps `-Onone`, Swift 5/default MainActor isolation and warnings-as-errors. Latency thresholds, fixture counts and production source are unchanged. These timings describe an optimized standalone executable, not GUI frame latency or an app Release archive.
+
+Exact local correction receipt: `file-operation-tests/20261025T031652-44714`: 26 PASS / 0 FAIL; 10k worst 22.10 ms, 100k first 0.45 ms / total 1176.27 ms, heartbeat maximum 30.11 ms. CI for the correction is tracked in issue #12/#18 after push.

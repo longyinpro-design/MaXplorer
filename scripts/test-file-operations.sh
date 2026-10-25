@@ -57,8 +57,10 @@ if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
         "$repo/MaXplorer/Models/QuickViewContent.swift"
         "$repo/MaXplorer/Models/PreviewWindowPlacement.swift")
 fi
-printf 'Test receipt: %s\n' "$run"
-xcrun swiftc -D MAXPLORER_FAULT_TESTS -parse-as-library -swift-version 5 -default-isolation MainActor -warnings-as-errors \
+optimization=(-Onone)
+if [[ "${MAXPLORER_TEST_OPTIMIZED:-0}" == "1" ]]; then optimization=(-O); fi
+printf 'Test receipt: %s\nSwift optimization: %s\n' "$run" "${optimization[0]}"
+xcrun swiftc -D MAXPLORER_FAULT_TESTS -parse-as-library -swift-version 5 -default-isolation MainActor -warnings-as-errors "${optimization[@]}" \
     -module-cache-path "$AGENT_BUILD_ROOT/swift-module-cache" \
     "${sources[@]}" "$repo/Tests/"*.swift -o "$run/file-operation-tests" 2>&1 | tee "$run/compile.log"
 "$run/file-operation-tests" "$run/fixtures" 2>&1 | tee "$run/tests.log"
