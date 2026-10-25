@@ -8,6 +8,55 @@ import Darwin
 /// writers are detected by metadata snapshots; this is not a filesystem snapshot
 /// or journal.
 nonisolated enum SafeFileOperations {
+    /// Faults are available only in the standalone safety-test build. The app
+    /// has no runtime/environment switch capable of enabling them.
+    enum FailurePoint: Hashable {
+        case copyData, publishPayload, rollbackBackup, restorePermissions
+        case cleanupStaging, cleanupBackup
+    }
+#if MAXPLORER_FAULT_TESTS
+    private static let failureLock = NSLock()
+    private static var injectedFailures: [FailurePoint: Int32] = [:]
+    private static var observedFailures: Set<FailurePoint> = []
+
+    static func setFailuresForTesting(_ failures: [FailurePoint: Int32]) {
+        failureLock.lock()
+        defer { failureLock.unlock() }
+        injectedFailures = failures
+        observedFailures = []
+    }
+
+    static func observedFailureForTesting(_ point: FailurePoint) -> Bool {
+        failureLock.lock()
+        defer { failureLock.unlock() }
+        return observedFailures.contains(point)
+    }
+#endif
+
+    private static func injectedFailure(at point: FailurePoint) -> Int32? {
+#if MAXPLORER_FAULT_TESTS
+        failureLock.lock()
+        defer { failureLock.unlock() }
+        guard let code = injectedFailures.removeValue(forKey: point) else { return nil }
+        observedFailures.insert(point)
+        return code
+#else
+        return nil
+#endif
+    }
+
+    private static func systemCall(at point: FailurePoint, _ operation: () -> Int32) -> Int32 {
+        if let code = injectedFailure(at: point) {
+            errno = code
+            return -1
+        }
+        return operation()
+    }
+
+    private static func checkInjectedFailure(at point: FailurePoint, url: URL) throws {
+        if let code = injectedFailure(at: point) { throw posix(code, url) }
+    }
+
     private static let mutationLock = NSLock()
     private static let capabilityLock = NSLock()
     private static var swapUnsupportedVolumes = Set<String>()
@@ -210,7 +259,7 @@ nonisolated enum SafeFileOperations {
                     published = true
                 }
 
-                if let payloadHandle, fchmod(payloadHandle.fd, payloadInfo.mode) != 0, published {
+                if let payloadHandle, systemCall(at: .restorePermissions, { fchmod(payloadHandle.fd, payloadInfo.mode) }) != 0, published {
                     keepRecovery = true
                     let backupNote = backupToRemove.map { " 旧目标备份保留在 \($0.path)。" } ?? ""
                     throw Failure("副本已保存到 \(destination.path)，但无法恢复其目录权限：\(posix(errno, destination).localizedDescription)\(backupNote)")
@@ -255,7 +304,10 @@ nonisolated enum SafeFileOperations {
             if isCancellation { throw CancellationError() }
             throw Failure("\(reported.localizedDescription)\(backupNote)")
         }
-        do { try FileManager.default.removeItem(at: staging) }
+        do {
+            try checkInjectedFailure(at: .cleanupStaging, url: staging)
+            try FileManager.default.removeItem(at: staging)
+        }
         catch {
             let backupNote = backupToRemove.map { " 旧目标备份保留在 \($0.path)。" } ?? ""
             throw Failure("目标项目已保存。恢复文件保留在 \(staging.path)：\(error.localizedDescription)\(backupNote)")
@@ -374,21 +426,15 @@ nonisolated enum SafeFileOperations {
             throw posix(errno, destination)
         }
 
-        guard renameatx_np(
-            stagingHandle.fd,
-            "payload",
-            destinationParent.fd,
-            destination.lastPathComponent,
-            UInt32(RENAME_EXCL)
-        ) == 0 else {
+        guard systemCall(at: .publishPayload, {
+            renameatx_np(stagingHandle.fd, "payload", destinationParent.fd,
+                         destination.lastPathComponent, UInt32(RENAME_EXCL))
+        }) == 0 else {
             let publishCode = errno
-            let rollback = renameatx_np(
-                destinationParent.fd,
-                backupName,
-                destinationParent.fd,
-                destination.lastPathComponent,
-                UInt32(RENAME_EXCL)
-            )
+            let rollback = systemCall(at: .rollbackBackup) {
+                renameatx_np(destinationParent.fd, backupName, destinationParent.fd,
+                             destination.lastPathComponent, UInt32(RENAME_EXCL))
+            }
             if rollback != 0 {
                 throw Failure("发布失败，旧目标备份保留在 \(backupURL.path)，且无法恢复原名称。")
             }
@@ -399,6 +445,7 @@ nonisolated enum SafeFileOperations {
     }
 
     private static func removeBackup(_ url: URL) throws {
+        try checkInjectedFailure(at: .cleanupBackup, url: url)
         try prepareToDiscard(url)
         try FileManager.default.removeItem(at: url)
     }
@@ -445,7 +492,11 @@ nonisolated enum SafeFileOperations {
             guard let rawContext else { return COPYFILE_QUIT }
             let context = Unmanaged<CopyContext>.fromOpaque(rawContext).takeUnretainedValue()
             if stage == COPYFILE_ERR {
-                context.errorCode = callbackErrno == 0 ? EIO : callbackErrno
+                // libcopyfile may report ECANCELED again after COPYFILE_QUIT.
+                // Preserve the first failure so disk/network errors stay actionable.
+                if context.errorCode == nil {
+                    context.errorCode = callbackErrno == 0 ? EIO : callbackErrno
+                }
                 return COPYFILE_QUIT
             }
             if Task.isCancelled {
@@ -466,6 +517,10 @@ nonisolated enum SafeFileOperations {
                 if copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &copied) == 0 {
                     context.fileBytes = Int64(copied)
                     context.progress(context.finishedBytes + context.fileBytes)
+                    if copied > 0, let code = SafeFileOperations.injectedFailure(at: .copyData) {
+                        context.errorCode = code
+                        return COPYFILE_QUIT
+                    }
                 }
             }
             if what == COPYFILE_RECURSE_FILE, stage == COPYFILE_FINISH {

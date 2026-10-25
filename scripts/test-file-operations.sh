@@ -48,7 +48,7 @@ if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
         "$repo/MaXplorer/Models/PreviewWindowPlacement.swift")
 fi
 printf 'Test receipt: %s\n' "$run"
-xcrun swiftc -parse-as-library -swift-version 5 -default-isolation MainActor -warnings-as-errors \
+xcrun swiftc -D MAXPLORER_FAULT_TESTS -parse-as-library -swift-version 5 -default-isolation MainActor -warnings-as-errors \
     -module-cache-path "$AGENT_BUILD_ROOT/swift-module-cache" \
     "${sources[@]}" "$repo/Tests/"*.swift -o "$run/file-operation-tests" 2>&1 | tee "$run/compile.log"
 "$run/file-operation-tests" "$run/fixtures" 2>&1 | tee "$run/tests.log"

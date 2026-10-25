@@ -3,7 +3,7 @@
 # build-distribution.sh
 #
 # Builds a distributable release of MaXplorer and drops the artifacts into
-# the repo's ./dist folder:
+# a new distribution-<timestamp>-<pid> folder (under AGENT_BUILD_ROOT when set):
 #
 #   dist/MaXplorer.app          - the built application bundle
 #   dist/MaXplorer-<version>.dmg - a compressed disk image with an /Applications shortcut
@@ -12,6 +12,7 @@
 #
 # Usage:
 #   ./scripts/build-distribution.sh                 # build using the project's signing settings
+#   DIST_DIR=/path/to/new/output ./scripts/build-distribution.sh
 #   CONFIGURATION=Debug ./scripts/build-distribution.sh
 #   SIGN=adhoc ./scripts/build-distribution.sh      # ad-hoc sign (no Developer account needed)
 #   SIGN=none  ./scripts/build-distribution.sh      # disable code signing entirely
@@ -30,7 +31,9 @@ SIGN="${SIGN:-project}"   # project | adhoc | none
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_PATH="${REPO_ROOT}/${PROJECT_NAME}.xcodeproj"
-DIST_DIR="${REPO_ROOT}/dist"
+# Never remove a prior distribution. Agent runs get a unique external output;
+# other callers can select an unused directory with DIST_DIR.
+DIST_DIR="${DIST_DIR:-${AGENT_BUILD_ROOT:-${REPO_ROOT}}/distribution-$(date +%Y%m%dT%H%M%S)-$$}"
 ARCHIVE_PATH="${DIST_DIR}/${PROJECT_NAME}.xcarchive"
 APP_NAME="${PROJECT_NAME}.app"
 
@@ -67,13 +70,17 @@ esac
 
 # --- Clean & prepare ---------------------------------------------------------
 log "Preparing ${DIST_DIR}"
-rm -rf "${DIST_DIR}"
+[ ! -e "${DIST_DIR}" ] || die "Output already exists; choose a new DIST_DIR: ${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
+DERIVED_DATA="${DIST_DIR}/DerivedData"
+PACKAGE_ROOT="${AGENT_BUILD_ROOT:-${DIST_DIR}}"
 
 # --- Resolve version ---------------------------------------------------------
 log "Reading build settings"
 BUILD_SETTINGS="$(xcodebuild -project "${PROJECT_PATH}" -scheme "${SCHEME}" \
-  -configuration "${CONFIGURATION}" -showBuildSettings 2>/dev/null || true)"
+  -configuration "${CONFIGURATION}" -derivedDataPath "${DERIVED_DATA}" \
+  -clonedSourcePackagesDirPath "${PACKAGE_ROOT}/SourcePackages" \
+  -packageCachePath "${PACKAGE_ROOT}/SwiftPackageCache" -showBuildSettings)"
 get_setting() { printf '%s\n' "${BUILD_SETTINGS}" | awk -F' = ' "/ $1 = /{print \$2; exit}"; }
 
 MARKETING_VERSION="$(get_setting MARKETING_VERSION)"; MARKETING_VERSION="${MARKETING_VERSION:-1.0}"
@@ -91,11 +98,18 @@ xcodebuild archive \
   -configuration "${CONFIGURATION}" \
   -destination 'generic/platform=macOS' \
   -archivePath "${ARCHIVE_PATH}" \
+  -derivedDataPath "${DERIVED_DATA}" \
+  -clonedSourcePackagesDirPath "${PACKAGE_ROOT}/SourcePackages" \
+  -packageCachePath "${PACKAGE_ROOT}/SwiftPackageCache" \
   ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} \
-  | grep -E '^(=== |\*\* |CompileSwift|Ld |CodeSign|error:|warning:)' || true
+  2>&1 | tee "${DIST_DIR}/archive.log"
 
 ARCHIVED_APP="${ARCHIVE_PATH}/Products/Applications/${APP_NAME}"
 [ -d "${ARCHIVED_APP}" ] || die "Archive did not produce ${APP_NAME}. Check signing settings (try SIGN=adhoc)."
+[ -x "${ARCHIVED_APP}/Contents/MacOS/${PROJECT_NAME}" ] || die "Archive executable is missing"
+if [[ "${SIGN}" != "none" ]]; then
+    codesign --verify --deep --strict "${ARCHIVED_APP}" 2>&1 | tee "${DIST_DIR}/signature.log"
+fi
 
 # --- Extract the .app --------------------------------------------------------
 log "Copying ${APP_NAME} into dist/"
@@ -114,7 +128,8 @@ hdiutil create \
   -fs HFS+ \
   -format UDZO \
   -ov \
-  "${DMG_PATH}" >/dev/null
+  "${DMG_PATH}" > "${DIST_DIR}/image.log" 2>&1
+hdiutil verify "${DMG_PATH}" >> "${DIST_DIR}/image.log" 2>&1
 
 # --- Checksum ----------------------------------------------------------------
 log "Writing checksum"

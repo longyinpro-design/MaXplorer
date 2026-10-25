@@ -89,7 +89,7 @@ A compact local proof copy, including byte-level UI checks and the build log, is
 
 ## v1.11 hardening update (2026-10-24)
 
-The safety engine now covers the network/non-APFS cases that were previously listed as unaccepted.
+The safety engine implements the fallback and error paths below. Their presence does not establish real SMB/exFAT acceptance; see the later evidence and remaining limits.
 
 - **Volume capability probe:** `RENAME_SWAP` support is probed once per mount and cached. Unsupported volumes use a backup-based publish path instead of failing the overwrite.
 - **Backup fallback:** the old destination is renamed to a private `.maxplorer-backup-*` name, the staged payload is published with `RENAME_EXCL`, and the backup is removed after the operation. If publishing fails, the old destination is renamed back. If rollback also fails, the failure reports the backup path instead of deleting data.
@@ -141,3 +141,7 @@ Command: `/Users/long/.local/bin/agent-storage run --project <worktree> -- scrip
 - Final core regression: **109 PASS / 0 FAIL**, including **24 batch rename cases** (`file-operation-tests/20261025T013958-80270/tests.log`). Receipt paths are relative to `/Volumes/yl/AgentData/build/file-operation-safety-dc4382bd30f7681a`.
 - New coverage includes literal template tokens, external target creation after preview, staging/publication failure rollback, modified swap refusal, and undo of swaps/chains/case-only names. Existing rename, move, copy and undo regressions also pass.
 - The earlier 100-test and 104-test low-space runs above are historical evidence, not a new cross-volume run of this candidate. No GUI automation, SMB/exFAT acceptance, distribution rebuild or installation is claimed for this validation.
+
+## Current safety/regression evidence (2026-10-25)
+
+See [safety-regression-acceptance.md](safety-regression-acceptance.md) for stale recovery identity protection, first-copy-error preservation, 12 injected failure branches, 176 passing core/performance checks, real mid-copy ENOSPC, isolated drag tests and the local universal Release/DMG artifact. The capability cache still only records unsupported results. Real SMB/exFAT and GUI acceptance remain incomplete; do not infer support from injected errors or source inspection.

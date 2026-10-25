@@ -383,6 +383,69 @@ extension FileOperationTests {
     }
 
     static func lowSpaceTests(_ volume: URL) async {
+        await test("real mid-copy low-space failure preserves originals and permits retry") { dir in
+            let targetDir = try directory(volume, UUID().uuidString)
+            defer { try? fm.removeItem(at: targetDir) }
+            let target = try file(targetDir, "target", "old")
+            let source = try directory(dir, "source")
+            let data = Data(repeating: 0x6b, count: 6 * 1024 * 1024)
+            for name in ["a.bin", "b.bin", "c.bin"] {
+                try data.write(to: source.appendingPathComponent(name))
+            }
+            let gate = TransferGate()
+            let progress = ProgressLog()
+            let task = Task {
+                try await SafeFileOperations.perform(.move, sourceURL: source, destinationURL: target,
+                                                     overwrite: true, progress: {
+                    progress.append($0)
+                    gate.pause($0)
+                })
+            }
+            do {
+                try await waitFor { gate.hasEntered }
+            } catch {
+                task.cancel()
+                gate.release()
+                _ = await task.result
+                throw error
+            }
+            // The preflight succeeded and native copyfile has written data. Fill
+            // only this private 24 MiB test filesystem before allowing it to continue.
+            let firstBytes = progress.snapshot.first(where: { $0 > 0 }) ?? 0
+            let filler = targetDir.appendingPathComponent("filler")
+            let fd = open(filler.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            var fillError: Int32 = fd < 0 ? errno : 0
+            if fd >= 0 {
+                let block = [UInt8](repeating: 0x41, count: 64 * 1024)
+                for _ in 0..<1024 {
+                    let count = block.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+                    if count < 0 { fillError = errno; break }
+                }
+                close(fd)
+            }
+            gate.release()
+            let result = await task.result
+            try expect(firstBytes > 0 && firstBytes < data.count * 3, "fixture did not pause during directory copy")
+            try expect(fillError == ENOSPC, "private volume was not filled to ENOSPC: \(fillError)")
+            switch result {
+            case .success: throw TestFailure.assertion("copy into exhausted volume unexpectedly succeeded")
+            case .failure(let error):
+                try expect(error.localizedDescription.contains("空间不足"), "actual ENOSPC misreported: \(error)")
+            }
+            try expect(contents(target) == "old", "incomplete copy replaced old target")
+            for name in ["a.bin", "b.bin", "c.bin"] {
+                let remainingSource = try Data(contentsOf: source.appendingPathComponent(name))
+                try expect(remainingSource == data, "mid-copy failure changed source")
+            }
+            try expectNoTransferResidue(in: targetDir)
+            try fm.removeItem(at: filler)
+            try await SafeFileOperations.perform(.copy, sourceURL: source, destinationURL: target,
+                                                 overwrite: true, progress: { _ in })
+            for name in ["a.bin", "b.bin", "c.bin"] {
+                let copied = try Data(contentsOf: target.appendingPathComponent(name))
+                try expect(copied == data, "retry after freeing space failed")
+            }
+        }
         await test("low-space overwrite preserves source and old destination") { dir in
             let targetDir = try directory(volume, UUID().uuidString)
             defer { try? fm.removeItem(at: targetDir) }
