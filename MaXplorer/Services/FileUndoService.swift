@@ -40,6 +40,9 @@ nonisolated struct FileUndoService {
             try await undoRename(from: from, to: to, expected: expected)
             return .completed
 
+        case .renameBatch(let items, let expected):
+            return await undoRenameBatch(entry: entry, items: items, expected: expected)
+
         case .move(let items, let expected):
             return try await undoMoves(
                 entryID: entry.id,
@@ -56,6 +59,40 @@ nonisolated struct FileUndoService {
             // must never be handed to the service as something to replay.
             throw FileUndoError.notRestorable("覆盖操作无法撤销，仅保留在撤销历史中。")
         }
+    }
+
+    private static func undoRenameBatch(
+        entry: FileUndoEntry,
+        items: [UndoMovePair],
+        expected: [URL: UndoItemState]
+    ) async -> FileUndoOutcome {
+        var eligible: [BatchRenamePreviewItem] = []
+        var failures: [String] = []
+        for (index, pair) in items.enumerated() {
+            let current = await state(of: pair.to)
+            if current.exists, current == expected[pair.to] {
+                eligible.append(BatchRenamePreviewItem(
+                    id: index, source: pair.to, originalName: pair.to.lastPathComponent,
+                    proposedName: pair.from.lastPathComponent, issue: nil
+                ))
+            } else {
+                failures.append("“\(pair.to.lastPathComponent)”已被修改或不存在，未恢复原名。")
+            }
+        }
+        // The same dependency-aware engine handles swaps, chains and case-only
+        // renames in both directions. Changed items are never passed to it.
+        let outcome = await BatchRenameService.execute(eligible)
+        failures += outcome.failures
+        if outcome.cancelled { failures.append("批量撤销已取消。") }
+        let restored = Set(outcome.renamed.map(\.from))
+        let remaining = items.filter { !restored.contains($0.to) }
+        guard !remaining.isEmpty else { return .completed }
+        return .partial(
+            remaining: FileUndoEntry(
+                id: entry.id, kind: .renameBatch(items: remaining, expected: expected), createdAt: entry.createdAt
+            ),
+            failures: failures
+        )
     }
 
     private static func undoRename(from: URL, to: URL, expected: UndoItemState) async throws {

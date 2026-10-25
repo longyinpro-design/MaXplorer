@@ -102,8 +102,8 @@ The safety engine now covers the network/non-APFS cases that were previously lis
 
 | Scenario | Command | Result |
 | --- | --- | --- |
-| Same-volume suite incl. forced swap fallback and recovery scanner | `scripts/test-file-operations.sh` | 85 PASS / 0 FAIL |
-| Low-space cross-volume (24 MB HFS+ image, 32 MB source) | `scripts/test-file-operations.sh --low-space` | 89 PASS / 0 FAIL, includes ENOSPC preservation |
+| Same-volume suite incl. forced swap fallback, recovery scanner, undo journal and batch rename | `scripts/test-file-operations.sh` | 100 PASS / 0 FAIL |
+| Low-space cross-volume (24 MB HFS+ image, 32 MB source) | `scripts/test-file-operations.sh --low-space` | 104 PASS / 0 FAIL, includes ENOSPC preservation |
 | ExFAT image creation | `scripts/test-file-operations.sh --exfat` | NOT RUN: this host refused ExFAT formatting (`hdiutil create -fs ExFAT` fails with “operation not allowed”), so exFAT coverage is `NOT_PROVEN` here |
 | SMB share overwrite/disconnect | manual | NOT RUN: no SMB share available in this environment; manual matrix still required |
 
@@ -121,4 +121,23 @@ The forced-fallback tests (`SafeFileOperations.setForcedSwapFallbackForTesting(t
 
 ### Verification (V11-06, 2026-10-24)
 
-`scripts/test-file-operations.sh` → **85 PASS / 0 FAIL**, including rename undo, move undo, batch move undo, batch partial failure, copy undo, modified-copy refusal, batch copy partial failure, occupied-original-location refusal, overwrite-marker refusal, the 20-entry history limit with newest-first ordering, marker skipping for the next undo, in-place replacement of partially undone entries, and batch accumulator grouping. `xcodebuild -project MaXplorer.xcodeproj -scheme MaXplorer build` succeeds.
+`scripts/test-file-operations.sh` → **100 PASS / 0 FAIL** (historical run; the original V11-06 suite had 85 tests), including rename undo, move undo, batch move undo, batch partial failure, copy undo, modified-copy refusal, batch copy partial failure, occupied-original-location refusal, overwrite-marker refusal, the 20-entry history limit with newest-first ordering, marker skipping for the next undo, in-place replacement of partially undone entries, and batch accumulator grouping. `xcodebuild -project MaXplorer.xcodeproj -scheme MaXplorer build` succeeds.
+
+## v1.11 batch rename update (2026-10-25)
+
+`⌥⌘R` opens the batch rename sheet for the current selection. Preview generation runs off the main thread and execution uses the same target names. Apply requires a completed preview for the current options; editing options invalidates the old preview. Controls are disabled while execution runs.
+
+- **Templates:** `{name}`, `{ext}`, `{index}`, `{date}`, `{parent}`, find/replace, case conversion and numbered sequences. Only tokens in the original template are expanded; tokens inside inserted file names remain literal. The original extension is retained when requested.
+- **Validation:** invalid/empty/overlong names, duplicate batch names and occupied external targets are rejected. Occupancy is rechecked when execution begins; every move uses `SafeFileOperations` with `overwrite: false`.
+- **Dependent names:** swaps, chains and case-only renames form dependency groups. All members of such a group are staged under private sibling names before publication. A failed publication first vacates published names, then restores the originals. An external change that prevents recovery retains the file and reports its full path.
+- **Cancellation and partial failure:** cancellation is honored between groups and during staging. Once publication starts, that group completes or rolls back in an independent task before cancellation is honored again. This prevents cancellation from stranding half of a swap. Unrelated groups may succeed independently; only successful final renames enter the undo journal.
+- **Undo:** `renameBatch` checks captured fingerprints and uses the same dependency-aware rename engine in reverse. Swaps, chains and case-only names can be undone. Modified files and occupied external names are preserved; blocked items remain in the journal for reporting/retry.
+
+### Verification (V11-11, 2026-10-25)
+
+Command: `/Users/long/.local/bin/agent-storage run --project <worktree> -- scripts/test-file-operations.sh`.
+
+- Initial focused regressions reproduced **4 FAIL**: swap/chain/case-only undo and cancellation cleanup (`file-operation-tests/20261025T013731-77556/tests.log`).
+- Final core regression: **109 PASS / 0 FAIL**, including **24 batch rename cases** (`file-operation-tests/20261025T013958-80270/tests.log`). Receipt paths are relative to `/Volumes/yl/AgentData/build/file-operation-safety-dc4382bd30f7681a`.
+- New coverage includes literal template tokens, external target creation after preview, staging/publication failure rollback, modified swap refusal, and undo of swaps/chains/case-only names. Existing rename, move, copy and undo regressions also pass.
+- The earlier 100-test and 104-test low-space runs above are historical evidence, not a new cross-volume run of this candidate. No GUI automation, SMB/exFAT acceptance, distribution rebuild or installation is claimed for this validation.

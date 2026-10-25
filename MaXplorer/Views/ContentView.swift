@@ -126,6 +126,9 @@ private struct ActiveBrowserView: View {
         .sheet(isPresented: $model.isUndoHistoryPresented) {
             UndoHistorySheet(journal: model.undoJournal)
         }
+        .sheet(isPresented: $model.isBatchRenamePresented) {
+            BatchRenameSheet(model: model)
+        }
         .confirmationDialog(
             "解压时发现同名项目",
             isPresented: Binding(
@@ -2862,6 +2865,175 @@ private struct RecoveryResidueSheet: View {
         } message: {
             Text("清理后这些临时目录及其中的数据将无法恢复。")
         }
+    }
+}
+
+private struct BatchRenameSheet: View {
+    @ObservedObject var model: FileBrowserViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("批量重命名（\(model.batchRenameItemCount) 项）")
+                    .font(.headline)
+                Spacer()
+                if model.batchRenameIsRunning {
+                    ProgressView(value: model.batchRenameProgress)
+                        .frame(width: 120)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("名称模板")
+                    .frame(width: 64, alignment: .trailing)
+                TextField("模板", text: $model.batchRenameOptions.template)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("名称模板")
+                Text("查找")
+                    .frame(width: 32, alignment: .trailing)
+                TextField("查找", text: $model.batchRenameOptions.findText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 96)
+                    .accessibilityLabel("查找文本")
+                Text("替换为")
+                    .frame(width: 48, alignment: .trailing)
+                TextField("替换为", text: $model.batchRenameOptions.replaceText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 96)
+                    .accessibilityLabel("替换文本")
+            }
+
+            .disabled(model.batchRenameIsRunning)
+
+            Text(BatchRenameOptions.templateHelp)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 16) {
+                Picker("大小写", selection: $model.batchRenameOptions.caseMode) {
+                    ForEach(RenameCaseMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .frame(width: 190)
+
+                Toggle("保留扩展名", isOn: $model.batchRenameOptions.keepsExtension)
+                    .toggleStyle(.checkbox)
+
+                Toggle("区分大小写查找", isOn: $model.batchRenameOptions.replaceCaseSensitive)
+                    .toggleStyle(.checkbox)
+            }
+
+            .disabled(model.batchRenameIsRunning)
+
+            HStack(spacing: 20) {
+                Stepper(
+                    "起始序号 \(model.batchRenameOptions.startNumber)",
+                    value: $model.batchRenameOptions.startNumber,
+                    in: 0...999_999
+                )
+                .frame(width: 170)
+
+                Stepper(
+                    "步长 \(model.batchRenameOptions.step)",
+                    value: $model.batchRenameOptions.step,
+                    in: 1...1_000
+                )
+                .frame(width: 130)
+
+                Stepper(
+                    "序号位数 \(model.batchRenameOptions.padding)",
+                    value: $model.batchRenameOptions.padding,
+                    in: 0...6
+                )
+                .frame(width: 140)
+            }
+
+            .disabled(model.batchRenameIsRunning)
+
+            preview
+
+            HStack(spacing: 12) {
+                if model.batchRenameIsRunning {
+                    Text("正在重命名…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if model.batchRenameIssueCount > 0 {
+                    Text("\(model.batchRenameIssueCount) 项存在问题，修正后才能应用")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("\(model.batchRenameChangeCount) 项将被重命名")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("取消") {
+                    if model.batchRenameIsRunning {
+                        model.cancelBatchRename()
+                    } else {
+                        model.isBatchRenamePresented = false
+                    }
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("应用") {
+                    model.applyBatchRename()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!model.batchRenameCanApply)
+            }
+        }
+        .padding(20)
+        .frame(width: 700)
+        .interactiveDismissDisabled(model.batchRenameIsRunning)
+        .onDisappear {
+            if !model.batchRenameIsRunning { model.cancelBatchRename() }
+        }
+        .onChange(of: model.batchRenameOptions) { _, _ in
+            model.refreshBatchRenamePreview()
+        }
+    }
+
+    private var preview: some View {
+        ZStack {
+            List(model.batchRenamePreview) { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(item.originalName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "arrow.right")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(item.proposedName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(item.issue == nil ? Color.primary : Color.red)
+                    }
+                    .font(.system(.body, design: .monospaced))
+
+                    if let issue = item.issue {
+                        Text(issue)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            .listStyle(.plain)
+
+            if model.batchRenamePreviewIsLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .frame(height: 240)
     }
 }
 

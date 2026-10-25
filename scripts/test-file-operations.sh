@@ -36,6 +36,8 @@ if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
         "$repo/MaXplorer/Models/SearchModels.swift"
         "$repo/MaXplorer/Models/TransferPlan.swift"
         "$repo/MaXplorer/Models/FileUndo.swift"
+        "$repo/MaXplorer/Models/BatchRename.swift"
+        "$repo/MaXplorer/Services/BatchRenameService.swift"
         "$repo/MaXplorer/ViewModels/FileUndoJournal.swift"
         "$repo/MaXplorer/Models/FinderTag.swift"
         "$repo/MaXplorer/Models/QuickViewContent.swift"

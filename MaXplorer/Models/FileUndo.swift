@@ -15,6 +15,7 @@ nonisolated struct UndoMovePair: Equatable, Sendable {
 
 nonisolated enum FileUndoKind: Equatable, Sendable {
     case rename(from: URL, to: URL, expected: UndoItemState)
+    case renameBatch(items: [UndoMovePair], expected: [URL: UndoItemState])
     case move(items: [UndoMovePair], expected: [URL: UndoItemState])
     case copy(created: [URL], expected: [URL: UndoItemState])
     /// A recorded action that cannot be restored (for example an overwrite).
@@ -23,7 +24,7 @@ nonisolated enum FileUndoKind: Equatable, Sendable {
 
     var title: String {
         switch self {
-        case .rename: return "重命名"
+        case .rename, .renameBatch: return "重命名"
         case .move: return "移动"
         case .copy: return "复制"
         case .notRestorable(let action, _): return action
@@ -33,6 +34,7 @@ nonisolated enum FileUndoKind: Equatable, Sendable {
     var affectedCount: Int {
         switch self {
         case .rename: return 1
+        case .renameBatch(let items, _): return items.count
         case .move(let items, _): return items.count
         case .copy(let created, _): return created.count
         case .notRestorable: return 1
@@ -50,6 +52,8 @@ nonisolated enum FileUndoKind: Equatable, Sendable {
         switch self {
         case .rename(let from, let to, _):
             return "“\(to.lastPathComponent)”恢复为“\(from.lastPathComponent)”"
+        case .renameBatch(let items, _):
+            return Self.renameBatchDetail(items)
         case .move(let items, _):
             return Self.moveDetail(items)
         case .copy(let created, _):
@@ -57,6 +61,13 @@ nonisolated enum FileUndoKind: Equatable, Sendable {
         case .notRestorable(_, let detail):
             return detail
         }
+    }
+
+    private static func renameBatchDetail(_ items: [UndoMovePair]) -> String {
+        guard items.count == 1, let item = items.first else {
+            return "\(items.count) 个项目恢复原名"
+        }
+        return "“\(item.to.lastPathComponent)”恢复为“\(item.from.lastPathComponent)”"
     }
 
     private static func moveDetail(_ items: [UndoMovePair]) -> String {

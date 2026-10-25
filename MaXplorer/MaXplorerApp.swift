@@ -104,6 +104,12 @@ struct MaXplorerApp: App {
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(model.selectedItem?.isNetworkLocation ?? true)
 
+                Button("批量重命名…") {
+                    model.beginBatchRename()
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+                .disabled(model.selectedItems.isEmpty)
+
                 Button("复制副本") {
                     model.duplicateSelected()
                 }

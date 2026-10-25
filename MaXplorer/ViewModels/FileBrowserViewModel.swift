@@ -138,6 +138,12 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var isIntegratedTerminalPresented = false
     @Published var isReadmePresented = false
     @Published var isUndoHistoryPresented = false
+    @Published var isBatchRenamePresented = false
+    @Published var batchRenameOptions = BatchRenameOptions()
+    @Published var batchRenamePreview: [BatchRenamePreviewItem] = []
+    @Published var batchRenamePreviewIsLoading = false
+    @Published private(set) var batchRenameIsRunning = false
+    @Published private(set) var batchRenameProgress: Double = 0
 
     let fileSystem: any FileSystemService
     let copyQueue: CopyQueueViewModel
@@ -148,6 +154,10 @@ final class FileBrowserViewModel: ObservableObject {
     private var undoBatchAccumulators: [UUID: UndoBatchAccumulator] = [:]
     /// Guards against a second ⌘Z while the first undo is still running.
     private var isUndoInProgress = false
+    private var batchRenameSources: [URL] = []
+    private var batchRenamePreviewOptions: BatchRenameOptions?
+    private var batchRenamePreviewTask: Task<Void, Never>?
+    private var batchRenameExecutionTask: Task<Void, Never>?
     private let networkBrowser = NetworkBrowserService()
     private var backStack: [URL] = []
     private var forwardStack: [URL] = []
@@ -1311,6 +1321,112 @@ final class FileBrowserViewModel: ObservableObject {
 
     private func rememberTransferDestination(_ url: URL) {
         UserDefaults.standard.set(url.path, forKey: Self.lastTransferDestinationKey)
+    }
+
+    // MARK: - Batch rename
+
+    var batchRenameCanApply: Bool {
+        !batchRenameIsRunning
+            && !batchRenamePreviewIsLoading
+            && batchRenamePreviewOptions == batchRenameOptions
+            && batchRenamePreview.allSatisfy { $0.issue == nil }
+            && batchRenamePreview.contains { $0.isChange }
+    }
+
+    var batchRenameItemCount: Int {
+        batchRenameSources.count
+    }
+
+    var batchRenameChangeCount: Int {
+        batchRenamePreview.filter(\.isChange).count
+    }
+
+    var batchRenameIssueCount: Int {
+        batchRenamePreview.filter { $0.issue != nil }.count
+    }
+
+    func beginBatchRename() {
+        guard !batchRenameIsRunning else { return }
+        let items = selectedItems.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        guard !items.isEmpty else { return }
+
+        batchRenameSources = items.map(\.url)
+        batchRenamePreview = []
+        batchRenameProgress = 0
+        isBatchRenamePresented = true
+        refreshBatchRenamePreview(debounce: false)
+    }
+
+    /// Recomputes the preview off the main thread. Typing in the sheet calls
+    /// this quickly, so the call is debounced and the previous task cancelled.
+    func refreshBatchRenamePreview(debounce: Bool = true) {
+        guard !batchRenameSources.isEmpty else { return }
+
+        batchRenamePreviewTask?.cancel()
+        batchRenamePreviewIsLoading = true
+
+        let urls = batchRenameSources
+        let options = batchRenameOptions
+        batchRenamePreviewTask = Task { [weak self] in
+            if debounce {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+            guard !Task.isCancelled else { return }
+
+            let preview = await Task.detached(priority: .userInitiated) {
+                BatchRenameService.preview(urls: urls, options: options)
+            }.value
+
+            guard !Task.isCancelled, let self else { return }
+            self.batchRenamePreview = preview
+            self.batchRenamePreviewOptions = options
+            self.batchRenamePreviewIsLoading = false
+        }
+    }
+
+    func cancelBatchRename() {
+        batchRenameExecutionTask?.cancel()
+        batchRenamePreviewTask?.cancel()
+    }
+
+    func applyBatchRename() {
+        guard batchRenameCanApply else { return }
+
+        let preview = batchRenamePreview
+        batchRenameIsRunning = true
+        batchRenameProgress = 0
+
+        // The task clears `batchRenameExecutionTask` when it finishes, so the
+        // strong capture only lives as long as the rename itself.
+        batchRenameExecutionTask = Task { [self] in
+            let outcome = await BatchRenameService.execute(preview) { done, total in
+                let fraction = total > 0 ? Double(done) / Double(total) : 0
+                Task { @MainActor in
+                    self.batchRenameProgress = fraction
+                }
+            }
+
+            self.batchRenameIsRunning = false
+            self.batchRenameExecutionTask = nil
+            self.isBatchRenamePresented = false
+
+            if !outcome.renamed.isEmpty {
+                let states = await FileUndoService.states(of: outcome.renamed.map(\.to))
+                self.undoJournal.record(
+                    FileUndoEntry(kind: .renameBatch(items: outcome.renamed, expected: states))
+                )
+            }
+
+            await self.reload(selecting: nil)
+
+            if !outcome.failures.isEmpty {
+                self.errorMessage = outcome.failures.joined(separator: "\n")
+            } else if outcome.cancelled {
+                self.errorMessage = "批量重命名已取消，已完成 \(outcome.renamed.count) 项。"
+            }
+        }
     }
 
     // MARK: - Undo
