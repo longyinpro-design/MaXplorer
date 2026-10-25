@@ -1372,6 +1372,7 @@ private struct SearchResultsSurface: View {
     var body: some View {
         VStack(spacing: 0) {
             SearchToolbar(model: model)
+            SearchConditionsBar(model: model)
             FileTableView(
                 renameItem: $renameItem,
                 renameText: $renameText,
@@ -1469,9 +1470,7 @@ private struct SearchToolbar: View {
 private struct SearchStatusView: View {
     @ObservedObject var model: FileBrowserViewModel
 
-    private var hasQuery: Bool {
-        !model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    private var hasQuery: Bool { model.hasSearchCriteria }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1483,16 +1482,16 @@ private struct SearchStatusView: View {
             } else if model.isSearching {
                 ProgressView()
                     .controlSize(.small)
-                Text("已扫描 \(model.searchScannedCount) 项，找到 \(model.displayedItems.count) 项")
+                Text("\(model.searchUsesIndex ? "已核对索引候选" : "已扫描") \(model.searchScannedCount) 项，找到 \(model.displayedItems.count) 项")
             } else if hasQuery {
                 Text("\(model.displayedItems.count) 项")
             } else {
-                Text("按名称搜索当前文件夹或当前卷")
+                Text("输入名称或设置筛选条件")
             }
             if model.searchSkippedCount > 0 {
                 Text("跳过 \(model.searchSkippedCount) 项")
                     .foregroundStyle(.secondary)
-                    .help("目录无法读取或项目元数据读取失败")
+                    .help("路径不符合当前范围/可见性规则，或目录及元数据不可读取")
             }
         }
         .accessibilityElement(children: .combine)

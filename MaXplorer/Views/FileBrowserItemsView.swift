@@ -58,11 +58,11 @@ struct FileTableView: View {
                     }
             } else if model.displayedItems.isEmpty {
                 if model.isSearchActive {
-                    if model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if !model.hasSearchCriteria {
                         ContentUnavailableView(
                             "搜索文件",
                             systemImage: "magnifyingglass",
-                            description: Text("输入关键词，按名称搜索当前文件夹或当前卷。")
+                            description: Text("输入名称、内容关键词或设置属性筛选。已启用条件同时满足才返回。")
                         )
                     } else if let error = model.searchErrorMessage {
                         ContentUnavailableView(
@@ -72,9 +72,11 @@ struct FileTableView: View {
                         )
                     } else {
                         ContentUnavailableView(
-                            "没有匹配的项目",
+                            model.searchUsesIndex ? "索引中未找到匹配" : "没有匹配的项目",
                             systemImage: "magnifyingglass",
-                            description: Text("尝试其他关键词、范围或匹配方式。")
+                            description: Text(model.searchUsesIndex
+                                ? "未索引、不支持或尚未更新的文件可能遗漏。可清除内容条件后按名称和属性查找。"
+                                : "尝试其他关键词、范围或筛选条件。")
                         )
                     }
                 } else {

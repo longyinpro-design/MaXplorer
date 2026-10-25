@@ -117,6 +117,18 @@ final class FileBrowserViewModel: ObservableObject {
             scheduleSearch()
         }
     }
+    @Published private(set) var searchFilters = SearchFilters()
+    @Published private(set) var searchContentQuery = ""
+    var searchUsesIndex: Bool { !searchContentQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var hasSearchCriteria: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || searchUsesIndex || searchFilters.isActive
+    }
+    func applySearchConditions(_ filters: SearchFilters, contentQuery: String) {
+        searchFilters = filters
+        searchContentQuery = contentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        scheduleSearch()
+    }
+
     @Published private(set) var isSearchActive = false
     @Published private(set) var isSearching = false
     @Published private(set) var searchScannedCount = 0
@@ -657,7 +669,7 @@ final class FileBrowserViewModel: ObservableObject {
         guard generation == searchGeneration, isSearchActive else { return }
 
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
+        guard hasSearchCriteria else {
             items = []
             displayedItems = []
             displaySections = []
@@ -699,7 +711,9 @@ final class FileBrowserViewModel: ObservableObject {
             query: query,
             mode: searchMode,
             showHiddenFiles: showHiddenFiles,
-            options: listingOptions
+            options: listingOptions,
+            filters: searchFilters,
+            contentQuery: searchContentQuery
         )
 
         do {

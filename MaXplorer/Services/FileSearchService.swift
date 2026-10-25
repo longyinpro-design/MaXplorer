@@ -1,37 +1,58 @@
 import Foundation
 
 nonisolated struct FileSearchService {
+    typealias IndexedCandidates = @Sendable (URL, String) -> AsyncThrowingStream<[URL], Error>
     let fileSystem: any FileSystemService
+    let indexedCandidates: IndexedCandidates
+
+    init(fileSystem: any FileSystemService,
+         indexedCandidates: @escaping IndexedCandidates = { SpotlightSearchService().search(root: $0, contentQuery: $1) }) {
+        self.fileSystem = fileSystem
+        self.indexedCandidates = indexedCandidates
+    }
 
     func search(
         root: URL,
         query: String,
         mode: SearchMatchMode,
         showHiddenFiles: Bool,
-        options: DirectoryListingOptions
+        options: DirectoryListingOptions,
+        filters: SearchFilters = SearchFilters(),
+        contentQuery: String = ""
     ) -> AsyncThrowingStream<SearchEvent, Error> {
         let root = root.standardizedFileURL
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let fileSystem = self.fileSystem
+        let indexedCandidates = self.indexedCandidates
+        let contentQuery = contentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return AsyncThrowingStream { continuation in
             let worker = Task.detached(priority: .userInitiated) {
-                guard !query.isEmpty else {
+                guard !query.isEmpty || !contentQuery.isEmpty || filters.isActive else {
                     continuation.yield(.finished(SearchSummary(scannedCount: 0, skippedCount: 0)))
                     continuation.finish()
                     return
                 }
 
                 do {
-                    let summary = try await Self.run(
-                        root: root,
-                        query: query,
-                        mode: mode,
-                        showHiddenFiles: showHiddenFiles,
-                        options: options,
-                        fileSystem: fileSystem,
-                        continuation: continuation
-                    )
+                    try filters.validate()
+                    try Task.checkCancellation()
+                    let root = try Self.validatedRoot(root)
+                    let summary: SearchSummary
+                    if contentQuery.isEmpty {
+                        summary = try await Self.run(
+                            root: root, query: query, mode: mode,
+                            showHiddenFiles: showHiddenFiles, options: options,
+                            filters: filters, fileSystem: fileSystem, continuation: continuation
+                        )
+                    } else {
+                        summary = try await Self.runIndexed(
+                            root: root, query: query, contentQuery: contentQuery, mode: mode,
+                            showHiddenFiles: showHiddenFiles, options: options,
+                            filters: filters, fileSystem: fileSystem,
+                            indexedCandidates: indexedCandidates, continuation: continuation
+                        )
+                    }
                     continuation.yield(.finished(summary))
                     continuation.finish()
                 } catch is CancellationError {
@@ -53,15 +74,10 @@ nonisolated struct FileSearchService {
         mode: SearchMatchMode,
         showHiddenFiles: Bool,
         options: DirectoryListingOptions,
+        filters: SearchFilters,
         fileSystem: any FileSystemService,
         continuation: AsyncThrowingStream<SearchEvent, Error>.Continuation
     ) async throws -> SearchSummary {
-        guard let rootValues = try? root.resourceValues(forKeys: [.isDirectoryKey]),
-            rootValues.isDirectory == true,
-            FileManager.default.isReadableFile(atPath: root.path) else {
-            throw SearchError.unreadableRoot(root)
-        }
-
         let keys: Set<URLResourceKey> = [
             .isDirectoryKey,
             .isPackageKey,
@@ -102,9 +118,10 @@ nonisolated struct FileSearchService {
             let (items, failedCount) = try await buildItems(urls: urls, fileSystem: fileSystem, options: options)
             skippedCount += failedCount
             try Task.checkCancellation()
-            guard !items.isEmpty else { return }
+            let matches = filters.isActive ? items.filter(filters.matches) : items
+            guard !matches.isEmpty else { return }
             hasPublishedResults = true
-            continuation.yield(.batch(items))
+            continuation.yield(.batch(matches))
             lastBatch = DispatchTime.now().uptimeNanoseconds
         }
 
@@ -119,11 +136,11 @@ nonisolated struct FileSearchService {
             }
 
             if values?.isPackage == true {
-                if mode.matches(url.lastPathComponent, query: query) {
+                if query.isEmpty || mode.matches(url.lastPathComponent, query: query) {
                     pendingURLs.append(url)
                 }
                 enumerator.skipDescendants()
-            } else if mode.matches(url.lastPathComponent, query: query) {
+            } else if query.isEmpty || mode.matches(url.lastPathComponent, query: query) {
                 pendingURLs.append(url)
             }
 
@@ -148,6 +165,77 @@ nonisolated struct FileSearchService {
             skippedCount: skippedCount
         )))
         return SearchSummary(scannedCount: scannedCount, skippedCount: skippedCount)
+    }
+
+    /// Canonicalize the explicit scope once, off-main. Returned candidates must
+    /// stay lexically below this root; symlink ancestors below it are never followed.
+    private static func validatedRoot(_ root: URL) throws -> URL {
+        guard root.isFileURL, root.host == nil || root.host == "" || root.host == "localhost",
+              !root.path.contains("\0") else { throw SearchError.unreadableRoot(root) }
+        let resolved = root.resolvingSymlinksInPath().standardizedFileURL
+        let values = try resolved.resourceValues(forKeys: [.isDirectoryKey])
+        guard values.isDirectory == true, FileManager.default.isReadableFile(atPath: resolved.path) else {
+            throw SearchError.unreadableRoot(root)
+        }
+        return resolved
+    }
+
+    private static func runIndexed(
+        root: URL, query: String, contentQuery: String, mode: SearchMatchMode,
+        showHiddenFiles: Bool, options: DirectoryListingOptions, filters: SearchFilters,
+        fileSystem: any FileSystemService, indexedCandidates: IndexedCandidates,
+        continuation: AsyncThrowingStream<SearchEvent, Error>.Continuation
+    ) async throws -> SearchSummary {
+        var scanned = 0
+        var skipped = 0
+        var seen = Set<URL>()
+        for try await candidates in indexedCandidates(root, contentQuery) {
+            try Task.checkCancellation()
+            var accepted: [URL] = []
+            for candidate in candidates {
+                try Task.checkCancellation()
+                let url = candidate.standardizedFileURL
+                guard seen.insert(url).inserted else { continue }
+                scanned += 1
+                guard try indexedCandidateIsVisible(url, root: root, showHiddenFiles: showHiddenFiles) else {
+                    skipped += 1
+                    continue
+                }
+                if query.isEmpty || mode.matches(url.lastPathComponent, query: query) { accepted.append(url) }
+            }
+            let (items, failures) = try await buildItems(urls: accepted, fileSystem: fileSystem, options: options)
+            skipped += failures
+            try Task.checkCancellation()
+            let matches = filters.isActive ? items.filter(filters.matches) : items
+            if !matches.isEmpty { continuation.yield(.batch(matches)) }
+            continuation.yield(.progress(SearchProgress(scannedCount: scanned, skippedCount: skipped)))
+        }
+        return SearchSummary(scannedCount: scanned, skippedCount: skipped)
+    }
+
+    private static func indexedCandidateIsVisible(_ url: URL, root: URL, showHiddenFiles: Bool) throws -> Bool {
+        guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost",
+              !url.path.contains("\0") else { return false }
+        let rootParts = root.pathComponents
+        let parts = url.pathComponents
+        guard parts.count > rootParts.count, parts.starts(with: rootParts) else { return false }
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .isAliasFileKey, .isHiddenKey]
+        var ancestor = root
+        for (index, component) in parts.dropFirst(rootParts.count).enumerated() {
+            try Task.checkCancellation()
+            ancestor.appendPathComponent(component, isDirectory: false)
+            guard let values = try? ancestor.resourceValues(forKeys: keys),
+                  FileManager.default.isReadableFile(atPath: ancestor.path) else { return false }
+            let isLeaf = index == parts.count - rootParts.count - 1
+            if !showHiddenFiles && (component.hasPrefix(".") || values.isHidden == true) { return false }
+            if !isLeaf {
+                guard values.isDirectory == true, values.isSymbolicLink != true,
+                      values.isAliasFile != true, values.isPackage != true else { return false }
+            } else if values.isDirectory == true && values.isSymbolicLink == true {
+                return false
+            }
+        }
+        return true
     }
 
     private static func buildItems(
