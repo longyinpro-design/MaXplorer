@@ -311,6 +311,10 @@ struct MaXplorerApp: App {
 
                 Divider()
 
+                Button("最近文件…") {
+                    model.isRecentFilesPresented = true
+                }
+
                 Button("主目录") {
                     model.navigate(to: FileManager.default.homeDirectoryForCurrentUser)
                 }

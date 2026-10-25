@@ -31,6 +31,7 @@ struct QuickViewContentView: View {
                 Spacer(minLength: 16)
 
                 Button("用默认应用打开") {
+                    RecentFilesStore.shared.record(content.url)
                     if !NSWorkspace.shared.open(content.url) {
                         openError = "无法打开此文件，请确认已安装兼容的应用。"
                     }

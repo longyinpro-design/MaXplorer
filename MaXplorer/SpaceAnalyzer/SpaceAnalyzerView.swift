@@ -349,6 +349,7 @@ private struct TileView: View {
         }
         .contextMenu {
             Button("打开") {
+                if !node.isDirectory { RecentFilesStore.shared.record(node.url) }
                 NSWorkspace.shared.open(node.url)
             }
             Button("浏览所在位置") {

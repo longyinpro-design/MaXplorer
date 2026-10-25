@@ -151,6 +151,7 @@ final class FileBrowserViewModel: ObservableObject {
     @Published var isIntegratedTerminalPresented = false
     @Published var isReadmePresented = false
     @Published var isUndoHistoryPresented = false
+    @Published var isRecentFilesPresented = false
     @Published var isBatchRenamePresented = false
     @Published var batchRenameOptions = BatchRenameOptions()
     @Published var batchRenamePreview: [BatchRenamePreviewItem] = []
@@ -1062,7 +1063,23 @@ final class FileBrowserViewModel: ObservableObject {
         if let navigationURL = selectedItem.navigationURL {
             navigate(to: navigationURL)
         } else {
+            if !selectedItem.isDirectory { RecentFilesStore.shared.record(selectedItem.url) }
             SystemActions.open(selectedItem.url)
+        }
+    }
+
+    func openRecentFile(_ url: URL) {
+        Task {
+            do {
+                let item = try await fileSystem.fileItem(at: url, options: DirectoryListingOptions())
+                guard !item.isDirectory, !item.isNetworkLocation else {
+                    throw CocoaError(.fileReadUnsupportedScheme)
+                }
+                RecentFilesStore.shared.record(url)
+                SystemActions.open(url)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1101,6 +1118,7 @@ final class FileBrowserViewModel: ObservableObject {
             return
         }
 
+        if !selectedItem.isDirectory { RecentFilesStore.shared.record(selectedItem.url) }
         SystemActions.open(selectedItem.url, with: application)
     }
 

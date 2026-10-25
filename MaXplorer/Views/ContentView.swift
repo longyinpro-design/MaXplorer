@@ -131,6 +131,17 @@ private struct ActiveBrowserView: View {
         .sheet(isPresented: $model.isBatchRenamePresented) {
             BatchRenameSheet(model: model)
         }
+        .sheet(isPresented: $model.isRecentFilesPresented) {
+            RecentFilesView { url in
+                model.isRecentFilesPresented = false
+                model.openRecentFile(url)
+            } onReveal: { url in
+                model.isRecentFilesPresented = false
+                tabs.browseLocation(url.deletingLastPathComponent())
+            } onClose: {
+                model.isRecentFilesPresented = false
+            }
+        }
         .confirmationDialog(
             "目标位置存在同名项目",
             isPresented: Binding(
@@ -981,6 +992,27 @@ private struct SidebarView: View {
                             }
                     }
                 }
+            }
+
+            Section("浏览") {
+                Button {
+                    model.isRecentFilesPresented = true
+                } label: {
+                    Label("最近文件…", systemImage: "clock")
+                }
+                .buttonStyle(.plain)
+                .sidebarHover()
+            }
+
+            Section("目录树") {
+                DirectoryTreeView(
+                    selectedURL: !tabs.isSearchActive && !tabs.isSpaceAnalyzerActive &&
+                        !tabs.isCopyQueueActive && model.detailDestination == .files ? model.currentURL : nil,
+                    showHiddenFiles: model.showHiddenFiles,
+                    onNavigate: tabs.browseLocation,
+                    onOpenInNewTab: tabs.openLocationInNewTab,
+                    onDrop: { urls, destination in model.moveItems(urls, to: destination) }
+                )
             }
 
             Section("磁盘") {
