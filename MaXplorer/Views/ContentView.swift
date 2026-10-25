@@ -2878,6 +2878,7 @@ private struct FileInfoSheet: View {
     @ObservedObject var model: FileBrowserViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var copiedPath = false
+    @State private var isPropertyEditorPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -2948,6 +2949,8 @@ private struct FileInfoSheet: View {
                     copiedPath = true
                 }
 
+                Button("编辑权限与标签…") { isPropertyEditorPresented = true }
+
                 Spacer()
 
                 Button("完成") {
@@ -2960,6 +2963,11 @@ private struct FileInfoSheet: View {
         .padding(20)
         .frame(width: 560)
         .onChange(of: item.id) { _, _ in copiedPath = false }
+        .sheet(isPresented: $isPropertyEditorPresented) {
+            FilePropertyEditorView(urls: (model.infoItems.isEmpty ? [item] : model.infoItems).map(\.url)) {
+                model.showInfo(for: item)
+            }
+        }
     }
 
     @ViewBuilder
