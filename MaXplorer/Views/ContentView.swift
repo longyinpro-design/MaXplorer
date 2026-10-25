@@ -1502,7 +1502,7 @@ private struct CopyQueueView: View {
                 .controlSize(.small)
                 .disabled(queue.isPaused ? !queue.canResume : !queue.canPause)
 
-                Text(queue.isPaused ? "\(queue.activeCopyCount) 项等待" : "\(queue.activeCopyCount) 项正在进行")
+                Text(queue.isPaused ? "\(queue.activeCopyCount) 项未完成（停止新任务调度）" : "\(queue.activeCopyCount) 项未完成")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -1528,6 +1528,8 @@ private struct CopyQueueView: View {
                                         tabs.openOrSelectLocation(item.destinationURL.deletingLastPathComponent())
                                     },
                                     onCancel: { queue.cancel(item.id) },
+                                    onPause: { queue.pauseItem(item.id) },
+                                    onResume: { queue.resumeItem(item.id) },
                                     onRetry: {
                                         pendingRetryItem = item
                                     },
@@ -1595,6 +1597,8 @@ private struct CopyQueueRow: View {
     let isPaused: Bool
     let onOpenDestination: () -> Void
     let onCancel: () -> Void
+    let onPause: () -> Void
+    let onResume: () -> Void
     let onRetry: () -> Void
     let onDismiss: () -> Void
 
@@ -1637,6 +1641,16 @@ private struct CopyQueueRow: View {
 
             Spacer(minLength: 8)
 
+            if item.state == .running {
+                switch item.transferPhase {
+                case .transferring:
+                    Button("暂停此项", action: onPause).buttonStyle(.borderless).controlSize(.small)
+                case .pauseRequested, .paused:
+                    Button("继续此项", action: onResume).buttonStyle(.borderless).controlSize(.small)
+                case .finalizing, .cancelling, .finished:
+                    EmptyView()
+                }
+            }
             if item.state.canRetry {
                 HStack(spacing: 8) {
                     Button("重试", action: onRetry)
@@ -1672,7 +1686,14 @@ private struct CopyQueueRow: View {
         case .pending:
             return isPaused ? "已暂停" : "等待中"
         case .running:
-            return item.operation == .move ? "正在移动" : "正在复制"
+            switch item.transferPhase {
+            case .pauseRequested: return "正在暂停…"
+            case .paused: return "此项已暂停（仅本次运行可继续）"
+            case .finalizing: return "正在完成"
+            case .cancelling: return "正在取消…"
+            case .finished: return "正在收尾"
+            case .transferring: return item.operation == .move ? "正在移动" : "正在复制"
+            }
         case .completed:
             return "已完成"
         case .failed(let reason):
@@ -1687,7 +1708,7 @@ private struct CopyQueueRow: View {
     }
 
     private var speedText: String {
-        guard item.state == .running, item.bytesPerSecond > 0 else {
+        guard item.state == .running, item.transferPhase == .transferring, item.bytesPerSecond > 0 else {
             return "速度 --"
         }
 

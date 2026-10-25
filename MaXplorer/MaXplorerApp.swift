@@ -26,6 +26,7 @@ struct MaXplorerApp: App {
                 ))
                 .frame(minWidth: 1120, minHeight: 620)
                 .onAppear {
+                    appDelegate.transferQueue = model.copyQueue
                     tabs.updateMaximumConcurrentTabs(settings.maximumConcurrentTabs)
                     tabs.applyListingOptions(DirectoryListingOptions(columns: settings.visibleColumns))
                 }

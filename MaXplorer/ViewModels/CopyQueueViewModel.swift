@@ -59,6 +59,8 @@ struct CopyQueueItem: Identifiable, Equatable {
     var copiedBytes: Int64
     var bytesPerSecond: Double
     var startedAt: Date?
+    var transferPhase: TransferControl.Phase = .transferring
+    var transferRevision: UInt64 = 0
 
     var progress: Double {
         guard totalBytes > 0 else {
@@ -69,7 +71,7 @@ struct CopyQueueItem: Identifiable, Equatable {
     }
 
     var estimatedSecondsRemaining: TimeInterval? {
-        guard state == .running, bytesPerSecond > 0, totalBytes > copiedBytes else {
+        guard state == .running, transferPhase == .transferring, bytesPerSecond > 0, totalBytes > copiedBytes else {
             return nil
         }
 
@@ -118,6 +120,9 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     private var tasks: [CopyQueueItem.ID: Task<Void, Never>] = [:]
+    private var controls: [CopyQueueItem.ID: TransferControl] = [:]
+    private var attempts: [CopyQueueItem.ID: UUID] = [:]
+    private var isShuttingDown = false
     private var aggregateTotalItemCount = 0
     private var aggregateFinishedItemCount = 0
 
@@ -342,10 +347,30 @@ final class CopyQueueViewModel: ObservableObject {
         if item.state == .running {
             // Keep ownership and the running slot until the worker acknowledges
             // cancellation, or finishes a publication that already committed.
+            controls[itemID]?.cancel()
             tasks[itemID]?.cancel()
         } else {
             markCancelled(itemID)
         }
+    }
+
+    func pauseItem(_ itemID: CopyQueueItem.ID) {
+        guard items.contains(where: { $0.id == itemID && $0.state == .running }) else { return }
+        controls[itemID]?.requestPause()
+    }
+
+    func resumeItem(_ itemID: CopyQueueItem.ID) {
+        controls[itemID]?.resume()
+    }
+
+    /// Normal quit cancels and wakes paused workers, then waits asynchronously
+    /// for actual cleanup/commit acknowledgements before the process exits.
+    func cancelAllAndWait() async {
+        isShuttingDown = true
+        isPaused = true
+        let running = Array(tasks.values)
+        for item in items where item.state.isActive { cancel(item.id) }
+        for task in running { await task.value }
     }
 
     func pause() {
@@ -360,6 +385,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     func retry(_ itemID: CopyQueueItem.ID, shouldOverwrite: Bool? = nil, approval: SafeFileOperations.ConflictApproval? = nil) {
+        guard !isShuttingDown else { return }
         guard let index = items.firstIndex(where: { $0.id == itemID }),
               items[index].state.canRetry else {
             return
@@ -374,6 +400,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     func retry(_ itemID: CopyQueueItem.ID, resolved: ResolvedTransferItem) {
+        guard !isShuttingDown else { return }
         guard let index = items.firstIndex(where: { $0.id == itemID }),
               items[index].state.canRetry, items[index].sourceURL == resolved.source.standardizedFileURL else { return }
         items[index].destinationURL = resolved.destination.standardizedFileURL
@@ -391,6 +418,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     func retryAllFailed() {
+        guard !isShuttingDown else { return }
         let failedIDs = items
             .filter { $0.state.canRetry && !retryNeedsOverwrite($0.id) }
             .map(\.id)
@@ -423,6 +451,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     private func resetForRetry(_ itemID: CopyQueueItem.ID) -> Bool {
+        guard !isShuttingDown else { return false }
         guard let index = items.firstIndex(where: { $0.id == itemID }),
               items[index].state.canRetry else {
             return false
@@ -436,11 +465,13 @@ final class CopyQueueViewModel: ObservableObject {
         items[index].copiedBytes = 0
         items[index].bytesPerSecond = 0
         items[index].startedAt = nil
+        items[index].transferPhase = .transferring
+        items[index].transferRevision = 0
         return true
     }
 
     private func startAvailableCopies() {
-        guard !isPaused else { return }
+        guard !isPaused, !isShuttingDown else { return }
 
         let runningCount = items.filter { $0.state == .running }.count
         let availableSlots = max(0, maximumConcurrentCopies - runningCount)
@@ -470,6 +501,14 @@ final class CopyQueueViewModel: ObservableObject {
         let operation = items[index].operation
         let shouldOverwrite = items[index].shouldOverwrite
         let approval = items[index].approval
+        let attempt = UUID()
+        attempts[itemID] = attempt
+        let control = TransferControl { [weak self] snapshot in
+            Task { @MainActor [weak self] in
+                self?.updateTransferState(snapshot, for: itemID, attempt: attempt)
+            }
+        }
+        controls[itemID] = control
         let progressThrottle = CopyProgressUpdateThrottle()
 
         tasks[itemID] = Task {
@@ -480,9 +519,10 @@ final class CopyQueueViewModel: ObservableObject {
                     destinationURL: destinationURL,
                     overwrite: shouldOverwrite,
                     approval: approval,
+                    control: control,
                     totalBytes: { total in
                         Task { @MainActor in
-                            self.updateTotalBytes(total, for: itemID)
+                            self.updateTotalBytes(total, for: itemID, attempt: attempt)
                         }
                     }
                 ) { copiedBytes in
@@ -490,7 +530,7 @@ final class CopyQueueViewModel: ObservableObject {
                         return
                     }
                     Task { @MainActor in
-                        self.updateCopiedBytes(copiedBytes, for: itemID)
+                        self.updateCopiedBytes(copiedBytes, for: itemID, attempt: attempt)
                     }
                 }
 
@@ -503,7 +543,17 @@ final class CopyQueueViewModel: ObservableObject {
         }
     }
 
-    private func updateTotalBytes(_ totalBytes: Int64, for itemID: CopyQueueItem.ID) {
+    private func updateTransferState(_ snapshot: TransferControl.Snapshot, for itemID: CopyQueueItem.ID, attempt: UUID) {
+        guard attempts[itemID] == attempt,
+              let index = items.firstIndex(where: { $0.id == itemID }), items[index].state == .running,
+              snapshot.revision >= items[index].transferRevision else { return }
+        items[index].transferRevision = snapshot.revision
+        items[index].transferPhase = snapshot.phase
+        if snapshot.phase != .transferring { items[index].bytesPerSecond = 0 }
+    }
+
+    private func updateTotalBytes(_ totalBytes: Int64, for itemID: CopyQueueItem.ID, attempt: UUID) {
+        guard attempts[itemID] == attempt else { return }
         guard let index = items.firstIndex(where: { $0.id == itemID }) else {
             return
         }
@@ -511,20 +561,23 @@ final class CopyQueueViewModel: ObservableObject {
         items[index].totalBytes = totalBytes
     }
 
-    private func updateCopiedBytes(_ copiedBytes: Int64, for itemID: CopyQueueItem.ID) {
+    private func updateCopiedBytes(_ copiedBytes: Int64, for itemID: CopyQueueItem.ID, attempt: UUID) {
+        guard attempts[itemID] == attempt else { return }
         guard let index = items.firstIndex(where: { $0.id == itemID }),
               items[index].state == .running else {
             return
         }
 
         items[index].copiedBytes = copiedBytes
-        if let startedAt = items[index].startedAt {
-            let elapsed = max(Date().timeIntervalSince(startedAt), 0.1)
-            items[index].bytesPerSecond = Double(copiedBytes) / elapsed
+        if let snapshot = controls[itemID]?.snapshot {
+            items[index].bytesPerSecond = snapshot.phase == .transferring
+                ? Double(copiedBytes) / max(snapshot.activeElapsed, 0.1) : 0
         }
     }
 
     private func complete(_ itemID: CopyQueueItem.ID) {
+        controls[itemID] = nil
+        attempts[itemID] = nil
         tasks[itemID] = nil
         guard let index = items.firstIndex(where: { $0.id == itemID }) else {
             startAvailableCopies()
@@ -560,6 +613,8 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     private func markCancelled(_ itemID: CopyQueueItem.ID) {
+        controls[itemID] = nil
+        attempts[itemID] = nil
         tasks[itemID] = nil
         guard let index = items.firstIndex(where: { $0.id == itemID }) else {
             startAvailableCopies()
@@ -578,6 +633,8 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     private func fail(_ itemID: CopyQueueItem.ID, message: String) {
+        controls[itemID] = nil
+        attempts[itemID] = nil
         tasks[itemID] = nil
         guard let index = items.firstIndex(where: { $0.id == itemID }) else {
             startAvailableCopies()
@@ -601,6 +658,7 @@ final class CopyQueueViewModel: ObservableObject {
     }
 
     private func appendToQueue(_ newItems: [CopyQueueItem]) {
+        guard !isShuttingDown else { return }
         // Failed/cancelled entries still belong to this progress cohort: a
         // later retry must share the denominator with newly enqueued work.
         if items.isEmpty {

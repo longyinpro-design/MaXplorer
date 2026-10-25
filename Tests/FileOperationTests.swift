@@ -99,6 +99,8 @@ nonisolated func expect(_ condition: @autoclosure () -> Bool, _ message: String)
         }
         await transferDestinationNamingTests()
         await conflictApprovalTests()
+        await transferControlTests()
+        await transferPauseTests()
         await transferConflictPlannerTests()
         await extendedTests()
         await quickViewTests()

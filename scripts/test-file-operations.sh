@@ -25,6 +25,7 @@ fi
 sources=("$repo/MaXplorer/ViewModels/CopyQueueViewModel.swift")
 if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
     sources+=("$repo/MaXplorer/Services/SafeFileOperations.swift"
+        "$repo/MaXplorer/Services/TransferControl.swift"
         "$repo/MaXplorer/Services/FileSystemService.swift"
         "$repo/MaXplorer/Services/FileSearchService.swift"
         "$repo/MaXplorer/Services/TransferPlanService.swift"

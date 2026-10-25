@@ -198,26 +198,30 @@ nonisolated enum SafeFileOperations {
         destinationURL: URL,
         overwrite: Bool,
         approval: ConflictApproval? = nil,
+        control: TransferControl? = nil,
         totalBytes: @escaping @Sendable (Int64) -> Void = { _ in },
         progress: @escaping @Sendable (Int64) -> Void
     ) async throws {
         let worker = Task.detached(priority: .background) {
+            defer { control?.finish() }
             try transact(operation, source: sourceURL, destination: destinationURL,
-                         overwrite: overwrite, approval: approval, totalBytes: totalBytes, progress: progress)
+                         overwrite: overwrite, approval: approval, control: control, totalBytes: totalBytes, progress: progress)
         }
         try await withTaskCancellationHandler {
             try await worker.value
-        } onCancel: { worker.cancel() }
+        } onCancel: { control?.cancel(); worker.cancel() }
     }
 
     private static func transact(
         _ operation: CopyQueueOperation, source: URL, destination: URL,
         overwrite: Bool,
         approval: ConflictApproval?,
+        control: TransferControl?,
         totalBytes: @escaping @Sendable (Int64) -> Void,
         progress: @escaping @Sendable (Int64) -> Void
     ) throws {
         try Task.checkCancellation()
+        try control?.checkpoint()
         guard approval == nil || overwrite else {
             throw Failure("冲突批准只适用于覆盖操作。")
         }
@@ -271,6 +275,8 @@ nonisolated enum SafeFileOperations {
         try destinationParent.validate()
         // An exclusive rename is sufficient for a same-volume non-overwrite move.
         if operation == .move, destinationInfo == nil {
+            // Waiting for pause must never hold the global publication lane.
+            try control?.beginFinalization()
             let renameResult = try withMutationLock { () -> Int32 in
                 try sourceParent.validate()
                 try destinationParent.validate()
@@ -291,6 +297,9 @@ nonisolated enum SafeFileOperations {
                 return
             }
             guard renameResult == EXDEV else { throw exclusiveRenameError(renameResult, destination, parent: destinationParent) }
+            // No publication happened. Cross-volume moves now copy data and
+            // must regain the pause gate before staging starts.
+            try control?.resumeDataPhaseAfterCrossVolumeFallback()
         }
 
         let swapSupported = destinationInfo != nil
@@ -313,7 +322,8 @@ nonisolated enum SafeFileOperations {
         var backupToRemove: URL?
         do {
             let stagingHandle = try DirectoryHandle(staging)
-            try copy(source, to: payload, progress: progress)
+            try copy(source, to: payload, control: control, progress: progress)
+            try control?.beginFinalization()
 
             try withMutationLock {
                 guard try snapshot(source) == before else {
@@ -631,10 +641,10 @@ nonisolated enum SafeFileOperations {
     }
 
     private static func copy(_ source: URL, to destination: URL,
-                             progress: @escaping @Sendable (Int64) -> Void) throws {
+                             control: TransferControl?, progress: @escaping @Sendable (Int64) -> Void) throws {
         guard let state = copyfile_state_alloc() else { throw posix(ENOMEM, source) }
         defer { copyfile_state_free(state) }
-        let context = CopyContext(progress: progress)
+        let context = CopyContext(control: control, progress: progress)
         let callback: copyfile_callback_t = { what, stage, state, from, to, rawContext in
             let callbackErrno = errno
             guard let rawContext else { return COPYFILE_QUIT }
@@ -648,6 +658,11 @@ nonisolated enum SafeFileOperations {
                 return COPYFILE_QUIT
             }
             if Task.isCancelled {
+                context.cancelled = true
+                return COPYFILE_QUIT
+            }
+            do { try context.control?.checkpoint() }
+            catch {
                 context.cancelled = true
                 return COPYFILE_QUIT
             }
@@ -694,6 +709,7 @@ nonisolated enum SafeFileOperations {
         // these existing private directories need their final metadata only.
         for (from, to) in context.directories {
             try Task.checkCancellation()
+            try control?.checkpoint()
             guard copyfile(from, to, nil, copyfile_flags_t(COPYFILE_METADATA | COPYFILE_NOFOLLOW)) == 0 else {
                 throw posix(errno, URL(fileURLWithPath: from))
             }
@@ -702,12 +718,16 @@ nonisolated enum SafeFileOperations {
 
     private final class CopyContext {
         let progress: @Sendable (Int64) -> Void
+        let control: TransferControl?
         var finishedBytes: Int64 = 0
         var fileBytes: Int64 = 0
         var directories: [(String, String)] = []
         var cancelled = false
         var errorCode: Int32?
-        init(progress: @escaping @Sendable (Int64) -> Void) { self.progress = progress }
+        init(control: TransferControl?, progress: @escaping @Sendable (Int64) -> Void) {
+            self.control = control
+            self.progress = progress
+        }
     }
 
     /// Only used for our unpublished replica, never for a replaced user item.
