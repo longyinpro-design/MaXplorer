@@ -41,6 +41,16 @@ struct NativeInteractionTests {
             return row
         }
 
+        test("native collection source requests focus before selecting") {
+            let row = view()
+            row.isSelected = false
+            var events: [String] = []
+            row.onFocus = { events.append("focus") }
+            row.onSelect = { _ in events.append("select") }
+            row.mouseDown(with: down)
+            row.mouseUp(with: up)
+            try expect(events == ["focus", "select"], "collection click did not request focus before selection")
+        }
         test("native source passes the original mouse-down event to AppKit") {
             let row = view()
             row.mouseDown(with: down)

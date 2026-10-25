@@ -23,6 +23,21 @@ final class AppSettings: ObservableObject {
     static let maximumConcurrentCopiedFilesRange = 1...5
     static let transferHistoryLimitRange = 0...500
 
+    private let presentationDefaults: UserDefaults
+    @Published var browserViewMode: FileBrowserViewMode {
+        didSet { presentationDefaults.set(browserViewMode.rawValue, forKey: "BrowserViewMode") }
+    }
+    @Published var browserGrouping: FileGroupingMode {
+        didSet { presentationDefaults.set(browserGrouping.rawValue, forKey: "BrowserGrouping") }
+    }
+    @Published var browserIconSize: Double {
+        didSet {
+            let clamped = FileBrowserPresentation.clampedIconSize(browserIconSize)
+            if browserIconSize != clamped { browserIconSize = clamped }
+            presentationDefaults.set(clamped, forKey: "BrowserIconSize")
+        }
+    }
+
     @Published var appearance: AppAppearance {
         didSet {
             UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey)
@@ -156,6 +171,14 @@ final class AppSettings: ObservableObject {
     var onServerConnectionSucceeded: ((URL) -> Void)?
 
     init(defaults: UserDefaults = .standard) {
+        presentationDefaults = defaults
+        browserViewMode = defaults.string(forKey: "BrowserViewMode")
+            .flatMap(FileBrowserViewMode.init(rawValue:)) ?? .details
+        browserGrouping = defaults.string(forKey: "BrowserGrouping")
+            .flatMap(FileGroupingMode.init(rawValue:)) ?? .none
+        browserIconSize = FileBrowserPresentation.clampedIconSize(
+            (defaults.object(forKey: "BrowserIconSize") as? Double) ?? 80
+        )
         let rawValue = defaults.string(forKey: Self.appearanceKey)
         self.appearance = rawValue.flatMap(AppAppearance.init(rawValue:)) ?? .system
         self.systemColorScheme = Self.currentSystemColorScheme

@@ -57,3 +57,8 @@ jobs:
         env:
           AGENT_BUILD_ROOT: ${{ runner.temp }}
         run: ./scripts/test-file-drag.sh
+
+      - name: Thumbnail scheduler with desktop services denied
+        env:
+          AGENT_BUILD_ROOT: ${{ runner.temp }}
+        run: ./scripts/test-file-thumbnails.sh

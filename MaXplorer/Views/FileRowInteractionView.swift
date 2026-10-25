@@ -6,6 +6,7 @@ class TableCellClickTargetNSView: NSView {
     var onLongPress: () -> Void = {}
     var isSelected = false
     var dragURLs: () -> [URL] = { [] }
+    var onFocus: () -> Void = {}
 
     private var longPressTimer: Timer?
     private var mouseDownEvent: NSEvent?
@@ -21,6 +22,7 @@ class TableCellClickTargetNSView: NSView {
         selectsOnMouseUp = false
         // This overlay handles selection itself, so native table mouseDown never
         // gets a chance to transfer focus away from a text field or terminal.
+        onFocus()
         var ancestor = superview
         while let view = ancestor {
             if let table = view as? NSTableView {

@@ -53,6 +53,13 @@ final class FileBrowserViewModel: ObservableObject {
     /// off the main actor only when the items, sort, or filter change, because
     /// the table, status bar, and selection logic all read it on every render.
     @Published private(set) var displayedItems: [FileItem] = []
+    @Published private(set) var displaySections: [FilePresentationSection] = []
+    var groupingMode: FileGroupingMode = .none {
+        didSet {
+            guard groupingMode != oldValue else { return }
+            scheduleDisplayUpdate()
+        }
+    }
     @Published private(set) var isLoading = false
     @Published private(set) var isCurrentDirectoryWritable = false
     @Published private(set) var loadsTagColors = false
@@ -367,6 +374,7 @@ final class FileBrowserViewModel: ObservableObject {
         let descriptor = FileSortDescriptor(sortOrder) ?? FolderSortStore.shared.defaultSort
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
         let showAliases = showAliases
+        let grouping = groupingMode
 
         displayTask?.cancel()
         displayTask = Task { [weak self] in
@@ -376,20 +384,22 @@ final class FileBrowserViewModel: ObservableObject {
                 }
             }
 
-            let displayed = await Task.detached(priority: .userInitiated) {
-                FileDisplayPipeline.displayedItems(
+            let sections = await Task.detached(priority: .userInitiated) {
+                let sorted = FileDisplayPipeline.displayedItems(
                     from: itemsSnapshot,
                     descriptor: descriptor,
                     query: query,
                     showAliases: showAliases
                 )
+                return FileBrowserPresentation.sections(from: sorted, grouping: grouping)
             }.value
 
             guard let self, generation == self.displayGeneration else {
                 return
             }
 
-            self.displayedItems = displayed
+            self.displaySections = sections
+            self.displayedItems = FileBrowserPresentation.flattenedItems(in: sections)
             if self.isAwaitingLoadDisplay {
                 self.isAwaitingLoadDisplay = false
                 self.isLoading = false
@@ -573,6 +583,7 @@ final class FileBrowserViewModel: ObservableObject {
         selectionAnchorID = nil
         items = []
         displayedItems = []
+        displaySections = []
         volumeStats = nil
         searchErrorMessage = nil
         searchScannedCount = 0
@@ -648,6 +659,7 @@ final class FileBrowserViewModel: ObservableObject {
         guard !query.isEmpty else {
             items = []
             displayedItems = []
+            displaySections = []
             selectedItemIDs = []
             selectionAnchorID = nil
             isSearching = false
@@ -671,6 +683,7 @@ final class FileBrowserViewModel: ObservableObject {
         loadGeneration += 1
         items = []
         displayedItems = []
+        displaySections = []
         selectedItemIDs = []
         selectionAnchorID = nil
         isLoading = true
@@ -807,6 +820,7 @@ final class FileBrowserViewModel: ObservableObject {
                 items = []
                 isAwaitingLoadDisplay = false
                 displayedItems = []
+                displaySections = []
                 selectedItemIDs = []
                 selectionAnchorID = nil
                 isLoading = false
@@ -2583,18 +2597,16 @@ final class FileBrowserViewModel: ObservableObject {
     }
 
     private func selectRange(through item: FileItem) {
-        guard
-            let anchorID = selectionAnchorID ?? selectedItemIDs.first,
-            let anchorIndex = displayedItems.firstIndex(where: { $0.id == anchorID }),
-            let targetIndex = displayedItems.firstIndex(where: { $0.id == item.id })
-        else {
+        let anchor = selectionAnchorID ?? displayedItems.first(where: { selectedItemIDs.contains($0.id) })?.id
+        let range = anchor.map {
+            FileBrowserPresentation.selectionRange(from: $0, to: item.id, in: displaySections)
+        } ?? []
+        guard !range.isEmpty else {
             selectedItemIDs = [item.id]
             selectionAnchorID = item.id
             return
         }
-
-        let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
-        selectedItemIDs = Set(bounds.map { displayedItems[$0].id })
+        selectedItemIDs = Set(range.map(\.id))
     }
 
     private static func serverURL(from input: String) -> URL? {

@@ -111,6 +111,7 @@ nonisolated func expect(_ condition: @autoclosure () -> Bool, _ message: String)
         await exclusiveCapabilityTests()
         await undoJournalTests()
         await batchRenameTests()
+        await fileBrowserPresentationTests()
         print("RESULT passed=\(passed) failed=\(failed)")
         if failed != 0 || passed == 0 { exit(1) }
     }

@@ -252,6 +252,18 @@ struct MaXplorerApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
 
+                Picker("浏览视图", selection: $settings.browserViewMode) {
+                    ForEach(FileBrowserViewMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                Picker("分组依据", selection: $settings.browserGrouping) {
+                    ForEach(FileGroupingMode.allCases) { grouping in
+                        Text(grouping.title).tag(grouping)
+                    }
+                }
+                Divider()
+
                 Toggle("显示隐藏文件", isOn: $tabs.showHiddenFiles)
                     .keyboardShortcut(".", modifiers: [.command, .shift])
 

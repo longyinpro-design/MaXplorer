@@ -36,6 +36,7 @@ if [[ -f "$repo/MaXplorer/Services/SafeFileOperations.swift" ]]; then
         "$repo/MaXplorer/Models/FileItem.swift"
         "$repo/MaXplorer/Models/FileColumn.swift"
         "$repo/MaXplorer/Models/FileDisplayPipeline.swift"
+        "$repo/MaXplorer/Models/FileBrowserPresentation.swift"
         "$repo/MaXplorer/Models/FileInfo.swift"
         "$repo/MaXplorer/Services/BasicFileActions.swift"
         "$repo/MaXplorer/Models/SearchModels.swift"
